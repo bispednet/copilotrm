@@ -42,6 +42,7 @@ export class HardwareAgent implements BusinessAgent {
         body: 'Dal controllo tecnico vedo margine per upgrade hardware/rete domestica (mesh, cablaggio o componenti). Vuoi una proposta in 3 fasce?',
         needsApproval: true,
         reason: 'cross-sell hardware da assistenza',
+        recipientRef: ctx.customer?.phone,
       });
     }
 

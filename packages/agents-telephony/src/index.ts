@@ -16,7 +16,7 @@ export class TelephonyAgent implements BusinessAgent {
 
     if (ctx.event.type === 'assistance.ticket.outcome' && ((p.inferredSignals as string[] | undefined) ?? []).includes('gamer')) {
       tasks.push({ id: id('task'), kind: 'followup', title: 'Proposta connectivity gaming', assigneeRole: 'telephony', priority: 9, customerId: ctx.event.customerId, status: 'open', createdAt: new Date().toISOString() });
-      drafts.push({ id: id('draft'), customerId: ctx.event.customerId, channel: 'whatsapp', audience: 'one-to-one', body: 'Se vuoi risolvere lag/ping possiamo proporti fibra + router/mesh ottimizzati per gaming. Ti preparo una proposta rapida?', needsApproval: true, reason: 'cross-sell gamer da assistenza' });
+      drafts.push({ id: id('draft'), customerId: ctx.event.customerId, channel: 'whatsapp', audience: 'one-to-one', body: 'Se vuoi risolvere lag/ping possiamo proporti fibra + router/mesh ottimizzati per gaming. Ti preparo una proposta rapida?', needsApproval: true, reason: 'cross-sell gamer da assistenza', recipientRef: ctx.customer?.phone });
     }
 
     if (ctx.event.type === 'offer.promo.ingested') {

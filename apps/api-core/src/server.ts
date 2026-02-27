@@ -1212,6 +1212,18 @@ export function buildServer(state = buildState()) {
         byChannel,
       },
       auditRecords: state.audit.list().length,
+      swarm: (() => {
+        const runs = state.swarmRuntime.listRuns(1000);
+        const withScore = runs.filter((r) => r.topActionScore != null);
+        return {
+          total: runs.length,
+          completed: runs.filter((r) => r.status === 'completed').length,
+          failed: runs.filter((r) => r.status === 'failed').length,
+          avgScore: withScore.length
+            ? Number((withScore.reduce((s, r) => s + (r.topActionScore ?? 0), 0) / withScore.length).toFixed(3))
+            : null,
+        };
+      })(),
     };
   });
 
@@ -1466,6 +1478,20 @@ export function buildServer(state = buildState()) {
       ticket.updatedAt = new Date().toISOString();
       state.assistance.upsert(ticket);
       void state.postgresMirror.saveTicket(ticket);
+
+      // Customer profile learning
+      if (ticket.customerId) {
+        const linkedCustomer = state.customers.getById(ticket.customerId);
+        if (linkedCustomer) {
+          if (!linkedCustomer.assistanceHistory.includes(ticket.id)) {
+            linkedCustomer.assistanceHistory.push(ticket.id);
+          }
+          const note = `[${new Date().toLocaleDateString('it-IT')}] ${ticket.deviceType}: ${ticket.outcome ?? 'pending'}${ticket.diagnosis ? ` — ${ticket.diagnosis}` : ''}${ticket.inferredSignals.length ? ` | signals: ${ticket.inferredSignals.join(', ')}` : ''}`;
+          linkedCustomer.conversationNotes.push(note);
+          state.customers.upsert(linkedCustomer);
+          void state.postgresMirror.saveCustomer(linkedCustomer);
+        }
+      }
 
       state.audit.write(
         makeAuditRecord('assist-desk', 'assist.ticket.outcome.updated', {

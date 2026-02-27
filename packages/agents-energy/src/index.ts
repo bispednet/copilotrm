@@ -36,6 +36,7 @@ export class EnergyAgent implements BusinessAgent {
         body: 'Ti preparo una simulazione rapida per ridurre costi energia in base ai tuoi consumi. Vuoi procedere?',
         needsApproval: true,
         reason: 'cross-sell energia da segnale assistenza',
+        recipientRef: ctx.customer?.phone,
       });
     }
 

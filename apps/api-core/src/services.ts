@@ -105,6 +105,7 @@ export async function buildOneToOneDraftsForOffer(params: {
         }
       }
 
+      const recipientRef = channel === 'whatsapp' ? t.customer.phone : t.customer.email;
       return {
         id: makeId('draft'),
         customerId: t.customer.id,
@@ -114,6 +115,7 @@ export async function buildOneToOneDraftsForOffer(params: {
         relatedOfferId: offer.id,
         needsApproval: true,
         reason: 'targeting profilato one-to-one',
+        recipientRef,
       };
     })
   );

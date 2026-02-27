@@ -48,6 +48,7 @@ type KPI = {
   tasks: { total: number; open: number; done: number; byKind: Record<string, number> };
   outbox: { total: number; pendingApprovals: number; byStatus: Record<string, number>; byChannel: Record<string, number> };
   auditRecords: number;
+  swarm?: { total: number; completed: number; failed: number; avgScore: number | null };
 };
 type SwarmRun = { id: string; eventType: string; status: string; startedAt: string; finishedAt?: string; agentsInvolved: string[]; topActionScore?: number };
 type SwarmStep = { id: string; agent: string; stepNo: number; status: string; tasksCreated: number; draftsCreated: number; startedAt: string; finishedAt?: string };
@@ -266,6 +267,10 @@ function App() {
               <article className="card stat"><span>Offerte attive</span><strong>{kpi?.offersActive ?? 0}</strong></article>
               <article className="card stat"><span>Ticket aperti</span><strong>{kpi?.ticketsOpen ?? 0}</strong></article>
               <article className="card stat"><span>Pending approval</span><strong>{kpi?.outbox.pendingApprovals ?? 0}</strong></article>
+              <article className="card stat"><span>Swarm runs</span><strong>{kpi?.swarm?.total ?? 0}</strong></article>
+              <article className="card stat"><span>Swarm completati</span><strong>{kpi?.swarm?.completed ?? 0}</strong></article>
+              <article className="card stat"><span>Avg top score</span><strong>{kpi?.swarm?.avgScore != null ? kpi.swarm.avgScore.toFixed(2) : '—'}</strong></article>
+              <article className="card stat"><span>Audit records</span><strong>{kpi?.auditRecords ?? 0}</strong></article>
             </section>
           </>
         )}

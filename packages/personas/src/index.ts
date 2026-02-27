@@ -4,6 +4,8 @@ import telephony from './telephony-agent.persona.json';
 import customerCare from './customer-care-agent.persona.json';
 import content from './content-agent.persona.json';
 import compliance from './compliance-agent.persona.json';
+import energy from './energy-agent.persona.json';
+import hardware from './hardware-agent.persona.json';
 
 export const personas = {
   assistance,
@@ -12,6 +14,8 @@ export const personas = {
   customerCare,
   content,
   compliance,
+  energy,
+  hardware,
 };
 
 export type PersonaKey = keyof typeof personas;
