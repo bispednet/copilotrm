@@ -39,6 +39,7 @@
       "@bisp/agents-energy": ["packages/agents-energy/src"],
       "@bisp/agents-hardware": ["packages/agents-hardware/src"],
       "@bisp/integrations-eliza": ["packages/integrations-eliza/src"],
+      "@bisp/integrations-llm": ["packages/integrations-llm/src"],
       "@bisp/integrations-danea": ["packages/integrations-danea/src"],
       "@bisp/integrations-email": ["packages/integrations-email/src"],
       "@bisp/integrations-social": ["packages/integrations-social/src"],

@@ -15,6 +15,7 @@ import { ObjectiveRepository } from '@bisp/domain-objectives';
 import { OfferRepository } from '@bisp/domain-offers';
 import { DaneaReadOnlyStub } from '@bisp/integrations-danea';
 import { ElizaPublishingAdapterStub, InMemoryRAGStore } from '@bisp/integrations-eliza';
+import { createLLMClient, type LLMClient } from '@bisp/integrations-llm';
 import { EmailChannelAdapter } from '@bisp/integrations-email';
 import { MediaGenerationServiceStub } from '@bisp/integrations-media';
 import { SocialChannelAdapter } from '@bisp/integrations-social';
@@ -33,6 +34,7 @@ import type {
   Segment,
   TaskItem,
 } from '@bisp/shared-types';
+import { loadConfig } from '@bisp/shared-config';
 import { ROLE_PERMISSIONS, can, type RbacRole } from '@bisp/shared-rbac';
 import { demoCustomers, demoObjectives, demoOffers } from './demoData';
 import { AdminSettingsRepository } from './admin/settings';
@@ -77,6 +79,7 @@ export interface ApiState {
   media: MediaGenerationServiceStub;
   postgresMirror: PostgresMirror;
   queueGateway: QueueGateway;
+  llm: LLMClient | null;
 }
 
 export function buildState(seed?: { customers?: CustomerProfile[]; offers?: ProductOffer[]; objectives?: ManagerObjective[] }): ApiState {
@@ -100,6 +103,15 @@ export function buildState(seed?: { customers?: CustomerProfile[]; offers?: Prod
     /^(redis|bullmq)$/i.test(process.env.BISPCRM_QUEUE_MODE ?? 'inline') ? 'redis' : 'inline',
     process.env.REDIS_URL ?? 'redis://localhost:6379'
   );
+
+  // LLM client — local-first con cloud fallback; null se nessun provider configurato
+  let llm: LLMClient | null = null;
+  try {
+    const appConfig = loadConfig();
+    llm = createLLMClient(appConfig.llm);
+  } catch {
+    // fallback graceful: sistema funziona con template string
+  }
 
   for (const c of seed?.customers ?? demoCustomers) customers.upsert(c);
   for (const o of seed?.offers ?? demoOffers) offers.upsert(o);
@@ -145,6 +157,7 @@ export function buildState(seed?: { customers?: CustomerProfile[]; offers?: Prod
     media: new MediaGenerationServiceStub(),
     postgresMirror,
     queueGateway,
+    llm,
   };
 }
 
@@ -1275,8 +1288,9 @@ export function buildServer(state = buildState()) {
       objectives: state.objectives.listActive(),
       max: 25,
     });
-    const oneToOne = req.body.includeOneToOne === false ? [] : buildOneToOneDraftsForOffer({ targets, offer });
-    const oneToMany = req.body.includeOneToMany === false ? [] : buildOneToManyDraftsForOffer({ offer, segment });
+    const llm = state.llm ?? undefined;
+    const oneToOne = req.body.includeOneToOne === false ? [] : await buildOneToOneDraftsForOffer({ targets, offer, llm });
+    const oneToMany = req.body.includeOneToMany === false ? [] : await buildOneToManyDraftsForOffer({ offer, segment, llm });
     return {
       offer,
       segment,
@@ -1293,9 +1307,10 @@ export function buildServer(state = buildState()) {
     if (!segment) return reply.code(400).send({ error: 'No target segment available for offer' });
 
     const targets = targetCustomersForOffer({ customers: state.customers.list(), offer, objectives: state.objectives.listActive(), max: 25 });
+    const llm = state.llm ?? undefined;
     const drafts = [
-      ...buildOneToOneDraftsForOffer({ targets, offer }),
-      ...buildOneToManyDraftsForOffer({ offer, segment }),
+      ...await buildOneToOneDraftsForOffer({ targets, offer, llm }),
+      ...await buildOneToManyDraftsForOffer({ offer, segment, llm }),
     ];
     const tasks = buildCampaignTasks(offer, segment);
     state.tasks.addMany(tasks);
@@ -1335,7 +1350,8 @@ export function buildServer(state = buildState()) {
     const segment = req.body.segment ?? offer.targetSegments[0];
     if (!segment) return reply.code(400).send({ error: 'No target segment available for offer' });
     const targets = targetCustomersForOffer({ customers: state.customers.list(), offer, objectives: state.objectives.listActive(), max: 25 });
-    const drafts = [...buildOneToOneDraftsForOffer({ targets, offer }), ...buildOneToManyDraftsForOffer({ offer, segment })];
+    const llmLatest = state.llm ?? undefined;
+    const drafts = [...await buildOneToOneDraftsForOffer({ targets, offer, llm: llmLatest }), ...await buildOneToManyDraftsForOffer({ offer, segment, llm: llmLatest })];
     const tasks = buildCampaignTasks(offer, segment);
     state.tasks.addMany(tasks);
     const outboxItems = state.drafts.addMany(drafts);
@@ -1374,7 +1390,7 @@ export function buildServer(state = buildState()) {
         .map((c) => [c.key, state.characterStudio.toElizaLike(c.key)])
         .filter(([, v]) => Boolean(v))
     ) as Record<string, unknown>;
-    const result = consultProposal({
+    const result = await consultProposal({
       customer,
       objectives: state.objectives.listActive(),
       offers: state.offers.listActive(),
@@ -1382,6 +1398,7 @@ export function buildServer(state = buildState()) {
       offerId: req.body.offerId,
       rag: state.rag,
       personaHintsOverride: personaHints,
+      llm: state.llm ?? undefined,
     });
     state.audit.write(makeAuditRecord('consult-agent', 'consult.proposal.generated', { customerId: customer.id, offerId: req.body.offerId ?? null }));
     return result;
