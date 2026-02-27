@@ -53,7 +53,15 @@ Questo repository contiene Sprint 0 + una parte sostanziale di Sprint 1/2 (in-me
 1. Installare Node 20+ e `pnpm`.
 2. `pnpm install`
 3. `pnpm build`
-4. `pnpm dev:api`
+4. Copiare env: `cp .env.example .env` (gia' predisposto in dev locale)
+5. Avvio rapido:
+`pnpm dev:start`
+
+Script utili:
+- `pnpm dev:api`: avvia solo API core con env autoload
+- `pnpm dev:start`: avvia API core + worker-content + gateway-channels
+
+Entrambi gli script caricano `.env` e, se Redis non e' in ascolto su `:6379`, fanno fallback automatico a `BISPCRM_QUEUE_MODE=inline` per evitare loop di errori `ECONNREFUSED`.
 
 Nota infra:
 - Docker non e' obbligatorio.
