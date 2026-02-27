@@ -120,10 +120,18 @@ export class AdminSettingsRepository {
 
   private bootstrap(elizaEnvPath: string, runtimePath: string): AdminSettingsState {
     const items: Record<string, AdminSettingItem> = {};
+
+    // Fonte primaria: process.env (caricato da dev-env.sh con /home/funboy/copilotrm/.env)
+    // Fonte secondaria: file .env di Eliza — solo per chiavi non presenti in process.env
+    // IMPORTANTE: process.env vince sempre per evitare di usare token/segreti di Eliza al posto di quelli CopilotRM
+    const processEnvClean = Object.fromEntries(
+      Object.entries(process.env).filter((e): e is [string, string] => e[1] !== undefined)
+    );
     const elizaEnv = existsSync(elizaEnvPath) ? parseDotEnv(readFileSync(elizaEnvPath, 'utf8')) : {};
+    const merged = { ...elizaEnv, ...processEnvClean }; // process.env sovrascrive eliza
 
     for (const c of SETTING_CATALOG) {
-      const raw = firstEnvValue(elizaEnv, c.envKeys);
+      const raw = firstEnvValue(merged, c.envKeys);
       const value = raw !== undefined ? (c.parse ? c.parse(raw) : raw) : inferDefaultValue(c);
       items[c.key] = {
         key: c.key,
