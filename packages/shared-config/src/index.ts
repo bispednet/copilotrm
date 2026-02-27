@@ -6,8 +6,6 @@ export interface AppConfig {
   apiPort: number;
   dbUrl: string;
   redisUrl: string;
-  elizaSourcePath: string;
-  elizaEnvFile: string;
   /** @deprecated usa llm.primary */
   llmProvider: 'local' | 'api';
   llm: LLMClientConfig;
@@ -32,10 +30,8 @@ export function loadConfig(
 
   return {
     apiPort: Number(env.PORT_API_CORE ?? 4010),
-    dbUrl: env.DATABASE_URL ?? 'postgres://postgres:postgres@localhost:5432/copilotrm',
+    dbUrl: env.DATABASE_URL ?? 'postgres://localhost:5432/copilotrm',
     redisUrl: env.REDIS_URL ?? 'redis://localhost:6379',
-    elizaSourcePath: env.ELIZA_SOURCE_PATH ?? '/home/funboy/eliza',
-    elizaEnvFile: env.ELIZA_ENV_FILE ?? '/home/funboy/eliza/.env',
     llmProvider: primary === 'ollama' ? 'local' : 'api',
     llm: {
       primary,

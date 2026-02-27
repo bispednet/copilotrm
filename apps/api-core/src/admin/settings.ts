@@ -1,5 +1,5 @@
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
-import { dirname } from 'node:path';
+import { dirname, join } from 'node:path';
 
 export type SettingsCategory = 'models' | 'channels' | 'autoposting' | 'agents' | 'system';
 
@@ -7,7 +7,7 @@ export interface AdminSettingItem {
   key: string;
   value: string | boolean | number | string[] | null;
   type: 'string' | 'boolean' | 'number' | 'secret' | 'string[]';
-  source: 'default' | 'eliza-env' | 'runtime';
+  source: 'default' | 'env' | 'runtime';
   category: SettingsCategory;
   description?: string;
 }
@@ -17,7 +17,10 @@ export interface AdminSettingsState {
   items: Record<string, AdminSettingItem>;
 }
 
-const DEFAULT_RUNTIME_SETTINGS_PATH = '/home/funboy/copilotrm/data/runtime-admin-settings.json';
+const DEFAULT_RUNTIME_SETTINGS_PATH = join(
+  process.env.COPILOTRM_DATA_DIR ?? join(process.cwd(), '..', '..', 'data'),
+  'runtime-admin-settings.json'
+);
 
 const SETTING_CATALOG: Array<{
   key: string;
@@ -69,20 +72,6 @@ function parseNum(raw: string): number | null {
   return Number.isFinite(n) ? n : null;
 }
 
-function parseDotEnv(content: string): Record<string, string> {
-  const out: Record<string, string> = {};
-  for (const line of content.split(/\r?\n/)) {
-    const trimmed = line.trim();
-    if (!trimmed || trimmed.startsWith('#')) continue;
-    const eq = trimmed.indexOf('=');
-    if (eq <= 0) continue;
-    const key = trimmed.slice(0, eq).trim();
-    const rawValue = trimmed.slice(eq + 1).trim();
-    const value = rawValue.split(' #')[0].trim();
-    out[key] = value;
-  }
-  return out;
-}
 
 function firstEnvValue(env: Record<string, string>, keys: string[]): string | undefined {
   for (const key of keys) {
@@ -112,32 +101,28 @@ export function maskSettingValue(setting: AdminSettingItem): AdminSettingItem['v
 export class AdminSettingsRepository {
   private state: AdminSettingsState;
 
-  constructor(opts?: { elizaEnvPath?: string; runtimeSettingsPath?: string }) {
-    const elizaEnvPath = opts?.elizaEnvPath ?? '/home/funboy/eliza/.env';
+  constructor(opts?: { runtimeSettingsPath?: string }) {
     const runtimePath = opts?.runtimeSettingsPath ?? DEFAULT_RUNTIME_SETTINGS_PATH;
-    this.state = this.bootstrap(elizaEnvPath, runtimePath);
+    this.state = this.bootstrap(runtimePath);
   }
 
-  private bootstrap(elizaEnvPath: string, runtimePath: string): AdminSettingsState {
+  private bootstrap(runtimePath: string): AdminSettingsState {
     const items: Record<string, AdminSettingItem> = {};
 
-    // Fonte primaria: process.env (caricato da dev-env.sh con /home/funboy/copilotrm/.env)
-    // Fonte secondaria: file .env di Eliza — solo per chiavi non presenti in process.env
-    // IMPORTANTE: process.env vince sempre per evitare di usare token/segreti di Eliza al posto di quelli CopilotRM
-    const processEnvClean = Object.fromEntries(
+    // Unica fonte: process.env, caricato da dev-env.sh con /home/funboy/copilotrm/.env
+    // Non si legge nessun file .env esterno: tutti i segreti vivono solo in .env di CopilotRM
+    const envSource = Object.fromEntries(
       Object.entries(process.env).filter((e): e is [string, string] => e[1] !== undefined)
     );
-    const elizaEnv = existsSync(elizaEnvPath) ? parseDotEnv(readFileSync(elizaEnvPath, 'utf8')) : {};
-    const merged = { ...elizaEnv, ...processEnvClean }; // process.env sovrascrive eliza
 
     for (const c of SETTING_CATALOG) {
-      const raw = firstEnvValue(merged, c.envKeys);
+      const raw = firstEnvValue(envSource, c.envKeys);
       const value = raw !== undefined ? (c.parse ? c.parse(raw) : raw) : inferDefaultValue(c);
       items[c.key] = {
         key: c.key,
         value,
         type: c.type,
-        source: raw !== undefined ? 'eliza-env' : 'default',
+        source: raw !== undefined ? 'env' : 'default',
         category: c.category,
         description: c.description,
       };

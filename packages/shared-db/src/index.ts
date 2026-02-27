@@ -13,7 +13,7 @@ export class PgRuntime {
 
   constructor(opts: PgRuntimeOptions) {
     this.pool = new Pool({ connectionString: opts.connectionString });
-    this.migrationsDir = opts.migrationsDir ?? '/home/funboy/copilotrm/infra/migrations';
+    this.migrationsDir = opts.migrationsDir ?? join(process.cwd(), '..', '..', 'infra', 'migrations');
   }
 
   async health(): Promise<{ ok: boolean; now?: string; error?: string }> {

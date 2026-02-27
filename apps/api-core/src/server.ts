@@ -1700,7 +1700,7 @@ Restituisci JSON con questi campi:
     const env = process.env;
 
     const co = {
-      name: env.COMPANY_NAME ?? 'bisp&d s.r.l.',
+      name: env.COMPANY_NAME ?? '',
       address: `${env.COMPANY_ADDRESS ?? ''}, ${env.COMPANY_CITY ?? ''}`,
       phone: env.COMPANY_PHONE ?? '',
       phone2: env.COMPANY_PHONE2 ?? '',

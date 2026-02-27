@@ -16,7 +16,11 @@ fi
 : "${BISPCRM_QUEUE_MODE:=redis}"
 : "${BISPCRM_QUEUE_MEDIA_JOBS:=true}"
 : "${REDIS_URL:=redis://localhost:6379}"
-: "${DATABASE_URL:=postgres://copilotrm:copilotrm_dev_pwd@localhost:5432/copilotrm}"
+# DATABASE_URL deve essere definita in .env — nessun default con credenziali nello script
+if [ -z "${DATABASE_URL:-}" ]; then
+  echo "[dev-env] ERROR: DATABASE_URL non definita. Configurala in .env" >&2
+  exit 1
+fi
 
 export BISPCRM_AUTH_MODE
 export BISPCRM_PERSISTENCE_MODE

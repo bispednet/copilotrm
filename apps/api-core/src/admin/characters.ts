@@ -1,5 +1,5 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { dirname } from 'node:path';
+import { dirname, join } from 'node:path';
 import { personas } from '@bisp/personas';
 import type { CopilotRMPersona } from '@bisp/integrations-eliza';
 import { toElizaLikeCharacter } from '@bisp/integrations-eliza';
@@ -15,7 +15,10 @@ export interface CharacterProfile extends CopilotRMPersona {
   updatedAt: string;
 }
 
-const DEFAULT_CHARACTERS_PATH = '/home/funboy/copilotrm/data/runtime-characters.json';
+const DEFAULT_CHARACTERS_PATH = join(
+  process.env.COPILOTRM_DATA_DIR ?? join(process.cwd(), '..', '..', 'data'),
+  'runtime-characters.json'
+);
 
 function nowIso(): string {
   return new Date().toISOString();
