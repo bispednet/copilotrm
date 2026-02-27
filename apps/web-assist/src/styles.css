@@ -1,0 +1,87 @@
+:root {
+  --bg: #eef2f7;
+  --ink: #142033;
+  --panel: #ffffff;
+  --line: #d7e0ee;
+  --accent: #d62e2e;
+  --accent-2: #1b5fd1;
+  --muted: #5f6f89;
+  --success: #1f9d5b;
+  --warn: #d97706;
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  color: var(--ink);
+  font-family: 'Trebuchet MS', 'Segoe UI', system-ui, sans-serif;
+  background:
+    radial-gradient(1200px 600px at 8% -10%, rgba(214,46,46,.15), transparent 60%),
+    radial-gradient(1200px 700px at 100% 0%, rgba(27,95,209,.16), transparent 55%),
+    linear-gradient(#f7f9fd, #edf2fa 55%, #e9eef7);
+}
+.shell { max-width: 1220px; margin: 0 auto; padding: 20px; }
+.dashboard { padding-bottom: 36px; }
+.hero {
+  display: flex; justify-content: space-between; gap: 18px; align-items: flex-start;
+  margin-bottom: 14px; background: linear-gradient(130deg, rgba(255,255,255,.95), rgba(255,255,255,.72));
+  border: 1px solid var(--line); border-radius: 20px; padding: 18px;
+  box-shadow: 0 14px 36px rgba(9,27,59,.07);
+}
+.heroActions { display: flex; gap: 8px; flex-wrap: wrap; }
+.eyebrow { text-transform: uppercase; letter-spacing: .14em; color: var(--accent); font-weight: 700; font-size: 11px; margin: 0 0 8px; }
+.lede { color: var(--muted); margin: 8px 0 0; }
+h1 { margin: 0; line-height: 1.03; font-size: clamp(28px, 3.5vw, 42px); max-width: 16ch; }
+h2 { margin: 0 0 10px; font-size: 18px; }
+h3 { margin: 12px 0 8px; font-size: 14px; }
+.card {
+  background: rgba(255,255,255,.92);
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  padding: 14px;
+  box-shadow: 0 10px 30px rgba(14,27,53,.05);
+}
+.grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 14px; margin-top: 14px; }
+.twoCols { grid-template-columns: 1.2fr 1fr; }
+.statsGrid { display: grid; grid-template-columns: repeat(4, minmax(160px,1fr)); gap: 10px; margin-bottom: 14px; }
+.stat span { color: var(--muted); font-size: 12px; display: block; }
+.stat strong { display: block; font-size: 28px; margin-top: 6px; }
+label { display: block; margin: 10px 0 6px; font-weight: 700; font-size: 13px; }
+input, textarea, select {
+  width: 100%; border: 1px solid var(--line); border-radius: 10px; padding: 10px 11px; background: #fff; color: inherit;
+}
+textarea { resize: vertical; }
+button {
+  margin-top: 10px; border: 0; border-radius: 999px; padding: 10px 14px; cursor: pointer;
+  color: white; background: linear-gradient(90deg, var(--accent), #ef4444); font-weight: 700;
+  box-shadow: 0 8px 18px rgba(214,46,46,.25);
+}
+button.ghost {
+  background: white; color: var(--accent-2); border: 1px solid #bfd0f1; box-shadow: none;
+}
+button.tab { background: transparent; color: var(--muted); border: 1px solid transparent; box-shadow: none; margin-top: 0; padding: 8px 12px; }
+button.tab.active { background: white; color: var(--accent-2); border-color: #c9daf8; }
+button:disabled { opacity: .6; cursor: not-allowed; }
+.tabs { display: flex; gap: 8px; margin: 0 0 14px; flex-wrap: wrap; }
+.muted { color: var(--muted); }
+.stackSection { margin-top: 12px; border-top: 1px dashed var(--line); padding-top: 10px; }
+.tableWrap { overflow: auto; }
+table { width: 100%; border-collapse: collapse; font-size: 13px; }
+th, td { padding: 8px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; }
+th { color: var(--muted); font-weight: 700; }
+ul { margin: 6px 0 0; padding-left: 18px; }
+.stacked { list-style: none; padding: 0; margin: 0; }
+.stacked li { display: flex; justify-content: space-between; gap: 10px; padding: 10px 0; border-bottom: 1px solid var(--line); }
+pre { background: #0f172a; color: #e2e8f0; border-radius: 12px; padding: 12px; overflow: auto; font-size: 12px; }
+.btnRow { display: flex; gap: 8px; flex-wrap: wrap; }
+@media (max-width: 960px) {
+  .hero { flex-direction: column; }
+  .twoCols { grid-template-columns: 1fr; }
+  .statsGrid { grid-template-columns: repeat(2, minmax(140px,1fr)); }
+}
+@media (max-width: 560px) {
+  .statsGrid { grid-template-columns: 1fr; }
+}
+@media (prefers-reduced-motion: no-preference) {
+  .card, .hero { animation: rise .25s ease both; }
+}
+@keyframes rise { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: translateY(0); } }

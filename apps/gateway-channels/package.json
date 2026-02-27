@@ -1,0 +1,28 @@
+{
+  "name": "@bisp/apps-gateway-channels",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "dev": "tsx watch src/index.ts",
+    "lint": "echo 'lint'",
+    "test": "echo 'test'"
+  },
+  "dependencies": {
+    "@fastify/cors": "^9.0.1",
+    "@bisp/integrations-email": "workspace:*",
+    "@bisp/integrations-social": "workspace:*",
+    "@bisp/integrations-telegram": "workspace:*",
+    "@bisp/integrations-whatsapp": "workspace:*",
+    "@bisp/shared-auth": "workspace:*",
+    "@bisp/shared-db": "workspace:*",
+    "@bisp/shared-types": "workspace:*",
+    "fastify": "^4.28.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.9.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.6.3"
+  }
+}

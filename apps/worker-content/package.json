@@ -1,0 +1,9 @@
+{
+  "name": "@bisp/apps-worker-content",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {"build":"tsc -p tsconfig.json","dev":"tsx watch src/index.ts","lint":"echo 'lint'","test":"echo 'test'"},
+  "dependencies": {"@bisp/integrations-eliza":"workspace:*","@bisp/integrations-media":"workspace:*","@bisp/shared-db":"workspace:*","@bisp/shared-logger":"workspace:*","bullmq":"^5.16.0","ioredis":"^5.4.1"},
+  "devDependencies": {"tsx":"^4.19.2","typescript":"^5.6.3","@types/node":"^22.9.0"}
+}

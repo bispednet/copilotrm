@@ -1,0 +1,38 @@
+version: '3.9'
+services:
+  postgres:
+    image: postgres:16
+    container_name: copilotrm-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: copilotrm
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - '5432:5432'
+    volumes:
+      - copilotrm_pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U postgres -d copilotrm']
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  redis:
+    image: redis:7
+    container_name: copilotrm-redis
+    restart: unless-stopped
+    ports:
+      - '6379:6379'
+    command: ['redis-server', '--appendonly', 'yes']
+    volumes:
+      - copilotrm_redis_data:/data
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+volumes:
+  copilotrm_pg_data:
+  copilotrm_redis_data:

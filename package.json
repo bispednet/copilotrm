@@ -1,0 +1,21 @@
+{
+  "name": "copilotrm-monorepo",
+  "version": "0.1.0",
+  "private": true,
+  "packageManager": "pnpm@9.12.0",
+  "scripts": {
+    "build": "turbo run build",
+    "dev": "turbo run dev --parallel",
+    "dev:api": "pnpm --filter @bisp/apps-api-core dev",
+    "infra:up": "bash -lc 'if command -v docker >/dev/null 2>&1; then docker compose -f infra/docker/docker-compose.dev.yml up -d; else echo \"Docker non presente: uso servizi locali (Postgres/Redis)\"; echo \"Verifica porte 5432/6379:\"; (command -v ss >/dev/null 2>&1 && ss -ltn | grep -E \":(5432|6379)\\\\s\" || true); fi'",
+    "infra:down": "bash -lc 'if command -v docker >/dev/null 2>&1; then docker compose -f infra/docker/docker-compose.dev.yml down; else echo \"Docker non presente: nessun compose da fermare (servizi locali gestiti dal sistema)\"; fi'",
+    "infra:logs": "bash -lc 'if command -v docker >/dev/null 2>&1; then docker compose -f infra/docker/docker-compose.dev.yml logs -f; else echo \"Docker non presente: usa journalctl/systemctl per i servizi locali (postgres/redis)\"; fi'",
+    "infra:check": "bash -lc 'echo \"Checking local infra...\"; (command -v ss >/dev/null 2>&1 && ss -ltn | grep -E \":(4010|5432|6379)\\\\s\" || true)'",
+    "lint": "turbo run lint",
+    "test": "turbo run test"
+  },
+  "devDependencies": {
+    "turbo": "^2.3.3",
+    "typescript": "^5.6.3"
+  }
+}

@@ -1,0 +1,77 @@
+/*
+  Adattamento ispirato a Eliza `knowledge.ts` / `ragknowledge.ts`:
+  - preprocess testo
+  - chunking
+  - retrieval astratto provider-agnostic
+*/
+
+export interface RAGDocument {
+  id: string;
+  text: string;
+  metadata?: Record<string, unknown>;
+}
+
+export interface RetrievedChunk {
+  docId: string;
+  chunkId: string;
+  text: string;
+  score: number;
+}
+
+export interface RAGStore {
+  add(doc: RAGDocument): void;
+  search(query: string, limit?: number): RetrievedChunk[];
+}
+
+export function preprocessKnowledgeText(content: string): string {
+  if (!content || typeof content !== 'string') return '';
+  return content
+    .replace(/```[\s\S]*?```/g, '')
+    .replace(/`.*?`/g, '')
+    .replace(/#{1,6}\s*(.*)/g, '$1')
+    .replace(/!\[(.*?)\]\(.*?\)/g, '$1')
+    .replace(/\[(.*?)\]\(.*?\)/g, '$1')
+    .replace(/<[^>]*>/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase();
+}
+
+export function splitChunks(text: string, chunkSize = 320, bleed = 32): string[] {
+  const clean = preprocessKnowledgeText(text);
+  if (!clean) return [];
+  const out: string[] = [];
+  let start = 0;
+  while (start < clean.length) {
+    const end = Math.min(start + chunkSize, clean.length);
+    out.push(clean.slice(start, end));
+    if (end >= clean.length) break;
+    start = Math.max(0, end - bleed);
+  }
+  return out;
+}
+
+export class InMemoryRAGStore implements RAGStore {
+  private docs = new Map<string, RAGDocument>();
+  private chunks: Array<{ docId: string; chunkId: string; text: string }> = [];
+
+  add(doc: RAGDocument): void {
+    this.docs.set(doc.id, doc);
+    const chunks = splitChunks(doc.text);
+    chunks.forEach((text, i) => {
+      this.chunks.push({ docId: doc.id, chunkId: `${doc.id}#${i}`, text });
+    });
+  }
+
+  search(query: string, limit = 5): RetrievedChunk[] {
+    const terms = preprocessKnowledgeText(query).split(' ').filter((t) => t.length > 2);
+    return this.chunks
+      .map((chunk) => {
+        const score = terms.reduce((acc, term) => acc + (chunk.text.includes(term) ? 1 : 0), 0) / Math.max(terms.length, 1);
+        return { ...chunk, score };
+      })
+      .filter((c) => c.score > 0)
+      .sort((a, b) => b.score - a.score)
+      .slice(0, limit);
+  }
+}
