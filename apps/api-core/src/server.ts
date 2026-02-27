@@ -1523,5 +1523,66 @@ export function buildServer(state = buildState()) {
     }
   );
 
+  // ─── CopilotRM Chat endpoint ─────────────────────────────────────────────
+
+  app.post<{
+    Body: {
+      message: string;
+      customerId?: string;
+      sessionId?: string;
+    };
+  }>('/api/chat', async (req, reply) => {
+    if (ensurePermission(req, reply, 'consult:read') === null) return;
+    const { message, customerId } = req.body;
+    if (!message?.trim()) {
+      return reply.code(400).send({ error: 'message è obbligatorio' });
+    }
+
+    const customer = customerId ? state.customers.getById(customerId) : undefined;
+
+    // Stub response when LLM is not configured
+    if (!state.llm) {
+      const stub = customer
+        ? `Ciao! Sono CopilotRM. Stai lavorando con il cliente ${customer.fullName} (segmenti: ${customer.segments?.join(', ')}). LLM non configurato — imposta LLM_PROVIDER nel file .env per risposte AI reali. Messaggio ricevuto: "${message}".`
+        : `Ciao! Sono CopilotRM. LLM non configurato — imposta LLM_PROVIDER nel file .env. Messaggio ricevuto: "${message}".`;
+      return { reply: stub, provider: 'stub', sessionId: req.body.sessionId };
+    }
+
+    const characters = state.characterStudio.list();
+    const mainChar = characters.find((c) => c.enabled) ?? characters[0];
+
+    const systemLines: string[] = [
+      'Sei CopilotRM, un assistente AI per la gestione clienti di un negozio di elettronica e telecomunicazioni.',
+    ];
+    if (mainChar) {
+      systemLines.push(`Il tuo ruolo: ${mainChar.role}.`);
+      if (mainChar.tone?.length) systemLines.push(`Tono: ${mainChar.tone.join(', ')}.`);
+      if (mainChar.goals?.length) systemLines.push(`Obiettivi: ${mainChar.goals.join('; ')}.`);
+      if (mainChar.limits?.length) systemLines.push(`Limiti: ${mainChar.limits.join('; ')}.`);
+    }
+    systemLines.push('Rispondi sempre in italiano, in modo conciso e orientato all\'azione.');
+
+    if (customer) {
+      systemLines.push(`Stai assistendo con il cliente: ${customer.fullName}.`);
+      if (customer.segments?.length) systemLines.push(`Segmenti cliente: ${customer.segments.join(', ')}.`);
+      if (customer.interests?.length) systemLines.push(`Interessi: ${customer.interests.join(', ')}.`);
+    }
+
+    try {
+      const res = await state.llm.chat(
+        [
+          { role: 'system', content: systemLines.join(' ') },
+          { role: 'user', content: message },
+        ],
+        { maxTokens: 512, temperature: 0.7 }
+      );
+      state.audit.write(makeAuditRecord('chat', 'chat.response', { customerId: customerId ?? null, provider: res.provider }));
+      return { reply: res.content, provider: res.provider, model: res.model, sessionId: req.body.sessionId };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return { reply: `Errore LLM: ${msg}`, provider: 'error', sessionId: req.body.sessionId };
+    }
+  });
+
   return app;
 }

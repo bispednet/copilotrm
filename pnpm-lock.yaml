@@ -345,6 +345,8 @@ importers:
         specifier: ^5.6.3
         version: 5.9.3
 
+  packages/agent-bus: {}
+
   packages/agents-assistance: {}
 
   packages/agents-compliance: {}
@@ -381,13 +383,19 @@ importers:
 
   packages/integrations-email: {}
 
+  packages/integrations-llm: {}
+
   packages/integrations-media: {}
+
+  packages/integrations-rss: {}
 
   packages/integrations-social: {}
 
   packages/integrations-telegram: {}
 
   packages/integrations-whatsapp: {}
+
+  packages/integrations-wordpress: {}
 
   packages/orchestrator-core: {}
 
