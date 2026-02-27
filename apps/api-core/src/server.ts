@@ -232,7 +232,7 @@ function buildChannelDispatchRecord(params: {
 }
 
 export function buildServer(state = buildState()) {
-  const app = Fastify({ logger: false });
+  const app = Fastify({ logger: { level: 'info' } });
   const authMode = (process.env.BISPCRM_AUTH_MODE ?? 'header') as 'none' | 'header';
   const authEnabled = authMode === 'header';
   const resolveRole = (headers: Record<string, unknown>): RbacRole => {
@@ -258,6 +258,10 @@ export function buildServer(state = buildState()) {
   void app.register(cors, {
     origin: true,
     methods: ['GET', 'POST', 'PATCH', 'PUT', 'DELETE', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization', 'x-bisp-role', 'Accept'],
+    exposedHeaders: ['x-bisp-role'],
+    preflightContinue: false,
+    optionsSuccessStatus: 204,
   });
   app.addHook('onReady', async () => {
     const shouldAutoLoad = envFlag(
