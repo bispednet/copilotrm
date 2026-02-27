@@ -171,6 +171,36 @@ function envFlag(name: string, defaultValue = false): boolean {
   return /^(1|true|yes|on)$/i.test(raw);
 }
 
+function getDailyContactCap(state: ApiState): number | null {
+  const caps = state.objectives.listActive()
+    .map((o) => o.dailyContactCapacity)
+    .filter((c): c is number => c != null && c > 0);
+  return caps.length > 0 ? Math.min(...caps) : null;
+}
+
+function countTodayOneToOneDispatched(state: ApiState): number {
+  const today = new Date().toDateString();
+  return state.drafts.list().filter((i) => {
+    if (i.draft.audience !== 'one-to-one') return false;
+    if (i.status === 'rejected') return false;
+    const d = i.createdAt ? new Date(i.createdAt).toDateString() : today; // created today = counts
+    return d === today;
+  }).length;
+}
+
+async function broadcastSwarmDebug(state: ApiState, runId: string, eventType: string, tasksCount: number, draftsCount: number): Promise<void> {
+  if (!envFlag('SWARM_DEBUG_TELEGRAM', false)) return;
+  try {
+    const snap = state.swarmRuntime.snapshot(runId);
+    const msgLines = snap.messages.slice(0, 6).map((m) =>
+      `  ${m.fromAgent}${m.toAgent ? `→${m.toAgent}` : ''} [${m.kind}]: ${m.content.slice(0, 80)}`
+    );
+    const agentsStr = snap.run?.agentsInvolved?.join(', ') ?? '?';
+    const text = [`🤖 RUN #${runId.slice(-6)} | ${eventType}`, ...msgLines, `✅ ${tasksCount} task | ${draftsCount} draft | agents: ${agentsStr}`].join('\n');
+    await state.channels.telegram.broadcastToGroups(text);
+  } catch { /* best-effort */ }
+}
+
 function persistOperationalOutput(state: ApiState, output: { tasks: TaskItem[]; drafts: CommunicationDraft[]; auditRecords: ReturnType<AuditTrail['list']> }) {
   state.tasks.addMany(output.tasks);
   const outboxItems = output.drafts.map((d) => {
@@ -865,10 +895,10 @@ export function buildServer(state = buildState()) {
       adapters: {
         danea: { mode: 'read-only-stub', enabled: true },
         eliza: { mode: 'adapter', enabled: true },
-        telegram: { mode: 'stub', enabled: true },
-        email: { mode: 'stub', enabled: true },
-        whatsapp: { mode: 'stub', enabled: true },
-        social: { mode: 'stub', enabled: true },
+        telegram: { mode: 'real', enabled: !!process.env.TELEGRAM_BOT_TOKEN },
+        email: { mode: 'real', enabled: !!process.env.SENDGRID_API_KEY },
+        whatsapp: { mode: 'real', enabled: !!process.env.WHATSAPP_API_TOKEN },
+        social: { mode: 'stub', enabled: false },
         media: { mode: 'service-layer-stub', enabled: true },
       },
       queue: await state.queueGateway.snapshot(),
@@ -1155,6 +1185,7 @@ export function buildServer(state = buildState()) {
     };
     const { output, runId } = await state.orchestrator.runSwarm(ctx, state.swarmRuntime);
     persistOperationalOutput(state, output);
+    void broadcastSwarmDebug(state, runId, event.type, output.tasks.length, output.drafts.length);
     return { ...output, swarmRunId: runId };
   });
 
@@ -1367,7 +1398,14 @@ export function buildServer(state = buildState()) {
     const segment = req.body.segment ?? offer.targetSegments[0];
     if (!segment) return reply.code(400).send({ error: 'No target segment available for offer' });
 
-    const targets = targetCustomersForOffer({ customers: state.customers.list(), offer, objectives: state.objectives.listActive(), max: 25 });
+    const dailyCap = getDailyContactCap(state);
+    const dispatchedToday = countTodayOneToOneDispatched(state);
+    const remainingCap = dailyCap != null ? Math.max(0, dailyCap - dispatchedToday) : 25;
+    if (dailyCap != null && remainingCap === 0) {
+      return reply.code(429).send({ error: 'dailyContactCapacity reached', sentToday: dispatchedToday, dailyCap });
+    }
+
+    const targets = targetCustomersForOffer({ customers: state.customers.list(), offer, objectives: state.objectives.listActive(), max: remainingCap });
     const llm = state.llm ?? undefined;
     const drafts = [
       ...await buildOneToOneDraftsForOffer({ targets, offer, llm }),
@@ -1410,7 +1448,13 @@ export function buildServer(state = buildState()) {
     if (!offer) return reply.code(404).send({ error: 'No offers available' });
     const segment = req.body.segment ?? offer.targetSegments[0];
     if (!segment) return reply.code(400).send({ error: 'No target segment available for offer' });
-    const targets = targetCustomersForOffer({ customers: state.customers.list(), offer, objectives: state.objectives.listActive(), max: 25 });
+    const dailyCapLatest = getDailyContactCap(state);
+    const dispatchedTodayLatest = countTodayOneToOneDispatched(state);
+    const remainingCapLatest = dailyCapLatest != null ? Math.max(0, dailyCapLatest - dispatchedTodayLatest) : 25;
+    if (dailyCapLatest != null && remainingCapLatest === 0) {
+      return reply.code(429).send({ error: 'dailyContactCapacity reached', sentToday: dispatchedTodayLatest, dailyCap: dailyCapLatest });
+    }
+    const targets = targetCustomersForOffer({ customers: state.customers.list(), offer, objectives: state.objectives.listActive(), max: remainingCapLatest });
     const llmLatest = state.llm ?? undefined;
     const drafts = [...await buildOneToOneDraftsForOffer({ targets, offer, llm: llmLatest }), ...await buildOneToManyDraftsForOffer({ offer, segment, llm: llmLatest })];
     const tasks = buildCampaignTasks(offer, segment);
@@ -1548,6 +1592,7 @@ export function buildServer(state = buildState()) {
       };
       const { output, runId } = await state.orchestrator.runSwarm(ctx, state.swarmRuntime);
       persistOperationalOutput(state, output);
+      void broadcastSwarmDebug(state, runId, event.type, output.tasks.length, output.drafts.length);
 
       return { ticket, orchestrator: output, swarmRunId: runId };
     }

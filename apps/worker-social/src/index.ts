@@ -2,12 +2,16 @@ import IORedis from 'ioredis';
 import { Worker } from 'bullmq';
 import { SocialChannelAdapter } from '@bisp/integrations-social';
 import { TelegramChannelAdapter } from '@bisp/integrations-telegram';
+import { EmailChannelAdapter } from '@bisp/integrations-email';
+import { WhatsAppChannelAdapter } from '@bisp/integrations-whatsapp';
 import { logger } from '@bisp/shared-logger';
 
 const redisUrl = process.env.REDIS_URL ?? 'redis://localhost:6379';
 const queueMode = /^(redis|bullmq)$/i.test(process.env.BISPCRM_QUEUE_MODE ?? 'inline') ? 'redis' : 'inline';
 const social = new SocialChannelAdapter();
 const telegram = new TelegramChannelAdapter();
+const email = new EmailChannelAdapter();
+const whatsapp = new WhatsAppChannelAdapter();
 
 if (queueMode !== 'redis') {
   logger.info('worker-social idle (queue mode inline)', { queueMode });
@@ -22,8 +26,11 @@ if (queueMode !== 'redis') {
   const worker = new Worker(
     'social-publish',
     async (job) => {
-      logger.info('worker-social job', { id: job.id, name: job.name, channel: job.data?.channel });
-      if (job.data?.channel === 'telegram') return telegram.queueOfferMessage(job.data);
+      const channel = job.data?.channel as string | undefined;
+      logger.info('worker-social job', { id: job.id, name: job.name, channel });
+      if (channel === 'telegram') return telegram.queueOfferMessage(job.data);
+      if (channel === 'email') return email.sendOrQueue(job.data);
+      if (channel === 'whatsapp') return whatsapp.sendOrQueue(job.data);
       return social.publish(job.data);
     },
     { connection }

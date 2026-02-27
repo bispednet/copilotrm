@@ -100,6 +100,10 @@ function App() {
 
   const [objectiveName, setObjectiveName] = useState('Nuovo obiettivo commerciale');
   const [objectiveOfferIds, setObjectiveOfferIds] = useState('');
+  const [objectiveStockIds, setObjectiveStockIds] = useState('');
+  const [objectiveMinMargin, setObjectiveMinMargin] = useState('');
+  const [objectiveDailyCap, setObjectiveDailyCap] = useState('');
+  const [objectiveCategoryWeights, setObjectiveCategoryWeights] = useState('{"smartphone":1.5}');
 
   const [settingDraft, setSettingDraft] = useState<Record<string, string>>({});
   const [selectedCharacterKey, setSelectedCharacterKey] = useState('');
@@ -682,10 +686,20 @@ function App() {
               <label>Nome obiettivo</label>
               <input value={objectiveName} onChange={(e) => setObjectiveName(e.target.value)} />
               <label>Preferred offer IDs (csv)</label>
-              <input value={objectiveOfferIds} onChange={(e) => setObjectiveOfferIds(e.target.value)} />
+              <input value={objectiveOfferIds} onChange={(e) => setObjectiveOfferIds(e.target.value)} placeholder="off_abc, off_xyz" />
+              <label>Stock clearance offer IDs (csv)</label>
+              <input value={objectiveStockIds} onChange={(e) => setObjectiveStockIds(e.target.value)} placeholder="off_da_smaltire" />
+              <label>Margine minimo % (es: 15)</label>
+              <input type="number" value={objectiveMinMargin} onChange={(e) => setObjectiveMinMargin(e.target.value)} placeholder="15" />
+              <label>Capacità contatti/giorno (es: 50)</label>
+              <input type="number" value={objectiveDailyCap} onChange={(e) => setObjectiveDailyCap(e.target.value)} placeholder="50" />
+              <label>Category weights (JSON)</label>
+              <input value={objectiveCategoryWeights} onChange={(e) => setObjectiveCategoryWeights(e.target.value)} placeholder='{"smartphone":1.5,"energy":2}' />
               <button
                 onClick={() =>
                   void runAction('objective.create', async () => {
+                    let parsedWeights: Record<string, number> = {};
+                    try { parsedWeights = JSON.parse(objectiveCategoryWeights) as Record<string, number>; } catch { /* ignore invalid json */ }
                     await apiFetch('/api/manager/objectives', {
                       method: 'POST',
                       headers: { 'content-type': 'application/json' },
@@ -696,6 +710,10 @@ function App() {
                         periodStart: new Date().toISOString(),
                         periodEnd: new Date(Date.now() + 1000 * 60 * 60 * 24 * 30).toISOString(),
                         preferredOfferIds: csvToList(objectiveOfferIds),
+                        stockClearanceOfferIds: csvToList(objectiveStockIds),
+                        minMarginPct: objectiveMinMargin ? Number(objectiveMinMargin) : undefined,
+                        dailyContactCapacity: objectiveDailyCap ? Number(objectiveDailyCap) : undefined,
+                        categoryWeights: parsedWeights,
                       }),
                     });
                   })
@@ -709,8 +727,18 @@ function App() {
               <h3>Obiettivi correnti</h3>
               <ul>
                 {objectives.map((o) => (
-                  <li key={o.id}>
-                    <strong>{o.name}</strong> · {o.active ? 'active' : 'inactive'}
+                  <li key={o.id} style={{ marginBottom: '0.5rem' }}>
+                    <strong>{o.name}</strong> · {o.active ? '🟢 active' : '⚫ inactive'}
+                    {(o as unknown as { minMarginPct?: number }).minMarginPct != null && (
+                      <span style={{ marginLeft: '0.5rem', fontSize: '0.8em', color: '#888' }}>
+                        margin≥{(o as unknown as { minMarginPct: number }).minMarginPct}%
+                      </span>
+                    )}
+                    {(o as unknown as { dailyContactCapacity?: number }).dailyContactCapacity != null && (
+                      <span style={{ marginLeft: '0.5rem', fontSize: '0.8em', color: '#888' }}>
+                        cap/day:{(o as unknown as { dailyContactCapacity: number }).dailyContactCapacity}
+                      </span>
+                    )}
                   </li>
                 ))}
               </ul>

@@ -10,6 +10,7 @@ export interface OutboxItem {
   rejectedAt?: string;
   sentAt?: string;
   externalId?: string;
+  createdAt?: string;
 }
 
 export interface CampaignRecord {
@@ -72,6 +73,7 @@ export class OutboxStore {
       id: draft.id,
       draft,
       status: draft.needsApproval ? 'pending-approval' : 'approved',
+      createdAt: new Date().toISOString(),
     };
     this.items.set(item.id, item);
     return item;
