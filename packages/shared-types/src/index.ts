@@ -57,6 +57,15 @@ export interface AssistanceTicket {
   inferredSignals: string[];
   createdAt: string;
   updatedAt: string;
+  // Extended fields populated by NLP intake
+  customerName?: string;
+  customerEmail?: string;
+  brand?: string;
+  model?: string;
+  serialNumber?: string;
+  hasWarranty?: boolean;
+  estimatedPrice?: number;
+  ticketNotes?: string;
 }
 
 export interface ProductOffer {

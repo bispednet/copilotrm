@@ -950,9 +950,22 @@ export function buildServer(state = buildState()) {
       issue: string;
       customerId?: string;
       inferredSignals?: string[];
+      // Extended NLP fields
+      customerName?: string;
+      customerEmail?: string;
+      brand?: string;
+      model?: string;
+      serialNumber?: string;
+      hasWarranty?: boolean;
+      estimatedPrice?: number;
+      ticketNotes?: string;
     };
   }>('/api/assist/tickets', async (req, reply) => {
-    const { phone, deviceType, issue, customerId, inferredSignals = [] } = req.body;
+    const {
+      phone, deviceType, issue, customerId, inferredSignals = [],
+      customerName, customerEmail, brand, model, serialNumber,
+      hasWarranty, estimatedPrice, ticketNotes,
+    } = req.body;
     if (!phone || !deviceType || !issue) {
       return reply.code(400).send({ error: 'phone, deviceType, issue are required' });
     }
@@ -973,6 +986,14 @@ export function buildServer(state = buildState()) {
       inferredSignals,
       createdAt: now,
       updatedAt: now,
+      customerName,
+      customerEmail,
+      brand,
+      model,
+      serialNumber,
+      hasWarranty,
+      estimatedPrice,
+      ticketNotes,
     };
 
     state.assistance.upsert(ticket);
@@ -1586,6 +1607,271 @@ export function buildServer(state = buildState()) {
       const msg = err instanceof Error ? err.message : String(err);
       return { reply: `Errore LLM: ${msg}`, provider: 'error', sessionId: req.body.sessionId };
     }
+  });
+
+  // ─── NLP Intake: testo libero → dati strutturati ────────────────────────────
+
+  app.post<{ Body: { text: string } }>('/api/assist/intake-nlp', async (req, reply) => {
+    if (ensurePermission(req, reply, 'inbound:read') === null) return;
+    const { text } = req.body;
+    if (!text?.trim()) return reply.code(400).send({ error: 'text è obbligatorio' });
+
+    // ── Fallback parser (regex) quando LLM non è configurato ──
+    function fallbackParse(raw: string): Record<string, unknown> {
+      const phoneMatch = raw.match(/(?:\+?39\s?)?(?:0\d{6,10}|3\d{9})/);
+      const phone = phoneMatch?.[0]?.replace(/\s/g, '') ?? '';
+      const catMap: Array<[string, RegExp]> = [
+        ['PC PORTATILE', /portati|laptop|notebook/i],
+        ['PC FISSO', /fisso|desktop|tower/i],
+        ['SMARTPHONE', /smartphone|iphone|samsung.*galaxy|android/i],
+        ['TABLET', /tablet|ipad/i],
+        ['CELLULARE', /cellulare|telefonino/i],
+        ['STAMPANTE', /stampa|printer|epson|canon|hp/i],
+        ['TELEVISORE', /tv|televisor|monitor/i],
+        ['CONSOLE', /playstation|ps[45]|xbox|nintendo/i],
+      ];
+      let deviceCategory = 'VARIE';
+      for (const [cat, re] of catMap) { if (re.test(raw)) { deviceCategory = cat; break; } }
+      const brandRe = /\b(apple|samsung|lg|asus|acer|dell|hp|lenovo|huawei|xiaomi|oppo|realme|honor|corsair|logitech|microsoft|sony)\b/i;
+      const brand = raw.match(brandRe)?.[1] ?? undefined;
+      // Rough name extraction: first-looking capitalized words before device mention
+      const nameMatch = raw.match(/^([A-ZÀÁÈÉÌÍÒÓÙÚ][a-zàáèéìíòóùú]+(?:\s+[A-ZÀÁÈÉÌÍÒÓÙÚ][a-zàáèéìíòóùú]+){0,2})/);
+      const customerName = nameMatch?.[1] ?? undefined;
+      return { customerName, phone, deviceCategory, brand, model: undefined, serialNumber: undefined, issueDescription: raw.trim(), hasWarranty: false, estimatedPrice: null, signals: [] };
+    }
+
+    if (!state.llm) {
+      const parsed = fallbackParse(text);
+      return { parsed, provider: 'fallback', rawText: text };
+    }
+
+    const systemPrompt = `Sei un assistente per l'accettazione di assistenza tecnica in un negozio di elettronica italiano.
+Il tuo compito è estrarre i dati strutturati dal testo parlato/scritto dall'operatore.
+Rispondi SOLO con JSON valido, senza markdown, senza spiegazioni.
+I valori non trovati devono essere null o stringa vuota.
+deviceCategory deve essere uno di: "PC PORTATILE","PC FISSO","SMARTPHONE","TABLET","CELLULARE","STAMPANTE","TELEVISORE","CONSOLE","VARIE".`;
+
+    const userPrompt = `Estrai i dati da questo testo di accettazione assistenza:
+"${text}"
+
+Restituisci JSON con questi campi:
+{
+  "customerName": "nome e cognome del cliente",
+  "phone": "numero telefono (solo cifre, no spazi)",
+  "deviceCategory": "categoria dispositivo",
+  "brand": "marca",
+  "model": "modello esatto",
+  "serialNumber": "numero seriale se presente",
+  "issueDescription": "descrizione completa e dettagliata del problema dichiarato dal cliente",
+  "hasWarranty": false,
+  "estimatedPrice": null,
+  "signals": ["array di tag: gamer|network-issue|hardware-fail|screen|battery|charging|water-damage|slow|virus|..."]
+}`;
+
+    try {
+      const res = await state.llm.chat(
+        [{ role: 'system', content: systemPrompt }, { role: 'user', content: userPrompt }],
+        { maxTokens: 600, temperature: 0.2 }
+      );
+      let parsed: Record<string, unknown>;
+      try {
+        // Strip markdown code fences if LLM wraps in ```json
+        const clean = res.content.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim();
+        parsed = JSON.parse(clean) as Record<string, unknown>;
+      } catch {
+        parsed = fallbackParse(text);
+        parsed['llmRaw'] = res.content;
+      }
+      return { parsed, provider: res.provider, model: res.model, rawText: text };
+    } catch (err) {
+      const parsed = fallbackParse(text);
+      return { parsed, provider: 'fallback', error: err instanceof Error ? err.message : String(err), rawText: text };
+    }
+  });
+
+  // ─── Scheda assistenza HTML (stampabile) ──────────────────────────────────
+
+  app.get<{ Params: { id: string } }>('/api/assist/tickets/:id/scheda', async (req, reply) => {
+    if (ensurePermission(req, reply, 'inbound:read') === null) return;
+    const ticket = state.assistance.list().find((t) => t.id === req.params.id);
+    if (!ticket) return reply.code(404).send({ error: 'Ticket non trovato' });
+
+    const customer = ticket.customerId ? state.customers.getById(ticket.customerId) : undefined;
+    const env = process.env;
+
+    const co = {
+      name: env.COMPANY_NAME ?? 'bisp&d s.r.l.',
+      address: `${env.COMPANY_ADDRESS ?? ''}, ${env.COMPANY_CITY ?? ''}`,
+      phone: env.COMPANY_PHONE ?? '',
+      phone2: env.COMPANY_PHONE2 ?? '',
+      email: env.COMPANY_EMAIL ?? '',
+      pec: env.COMPANY_PEC ?? '',
+      website: env.COMPANY_WEBSITE ?? '',
+      vat: env.COMPANY_VAT ?? '',
+      cf: env.COMPANY_CF ?? '',
+    };
+
+    const dateStr = new Date(ticket.createdAt).toLocaleDateString('it-IT', { year: 'numeric', month: '2-digit', day: '2-digit' });
+    const ticketNum = ticket.id.replace('ticket_', '').toUpperCase();
+    const customerName = ticket.customerName ?? customer?.fullName ?? '—';
+    const html = `<!DOCTYPE html>
+<html lang="it">
+<head>
+<meta charset="utf-8">
+<title>Scheda Assistenza ${ticketNum}</title>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{font-family:'Segoe UI',Arial,sans-serif;font-size:11px;color:#111;background:#fff;padding:12mm}
+  @media print{body{padding:0}@page{size:A4;margin:12mm}}
+  .header{display:flex;justify-content:space-between;align-items:flex-start;border-bottom:2px solid #c00;padding-bottom:8px;margin-bottom:10px}
+  .co-name{font-size:18px;font-weight:700;color:#c00}
+  .co-details{font-size:10px;line-height:1.6;color:#333}
+  .ticket-ref{text-align:right}
+  .ticket-ref .num{font-size:22px;font-weight:700;color:#1a3d6b}
+  .ticket-ref .lbl{font-size:10px;color:#666;text-transform:uppercase;letter-spacing:.05em}
+  .section{border:1px solid #bbb;border-radius:4px;margin-bottom:8px;overflow:hidden}
+  .section-title{background:#1a3d6b;color:#fff;font-weight:700;font-size:10px;text-transform:uppercase;letter-spacing:.06em;padding:4px 8px}
+  .fields{display:grid;gap:0}
+  .row{display:flex;border-top:1px solid #ddd}
+  .row:first-child{border-top:none}
+  .field{flex:1;padding:5px 8px;border-right:1px solid #ddd}
+  .field:last-child{border-right:none}
+  .field-2{flex:2}
+  .field-3{flex:3}
+  .lbl{font-size:9px;color:#666;text-transform:uppercase;letter-spacing:.04em;display:block;margin-bottom:2px}
+  .val{font-size:11px;font-weight:600;min-height:14px}
+  .bigtext{padding:8px;min-height:50px;font-size:11px;line-height:1.6;white-space:pre-wrap}
+  .footer{display:flex;justify-content:space-between;margin-top:12px;gap:20px}
+  .sig-box{flex:1;border-top:1px solid #bbb;padding-top:6px;font-size:10px;color:#555}
+  .barcode-placeholder{font-family:monospace;font-size:9px;letter-spacing:.1em;color:#888;border:1px dashed #ccc;padding:4px 8px;display:inline-block;border-radius:3px}
+  .watermark{position:fixed;top:50%;left:50%;transform:translate(-50%,-50%) rotate(-30deg);font-size:80px;color:rgba(200,0,0,.04);font-weight:900;pointer-events:none;z-index:-1}
+  .warn{color:#c00;font-size:9px}
+  .status-pill{display:inline-block;padding:2px 8px;border-radius:999px;font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:.05em}
+  .status-pending{background:#fef3c7;color:#92400e}
+  .status-repair{background:#d1fae5;color:#065f46}
+  .status-not-worth{background:#fee2e2;color:#991b1b}
+  .no-print{margin-top:14px;text-align:center}
+  @media print{.no-print{display:none}}
+  button.print-btn{background:#1a3d6b;color:#fff;border:none;padding:10px 24px;font-size:14px;border-radius:6px;cursor:pointer;font-weight:600}
+  button.print-btn:hover{background:#153168}
+</style>
+</head>
+<body>
+<div class="watermark">ASSISTENZA</div>
+
+<!-- Header -->
+<div class="header">
+  <div>
+    <div class="co-name">${co.name}</div>
+    <div class="co-details">
+      ${co.address}<br>
+      Tel: ${co.phone}${co.phone2 ? ' / ' + co.phone2 : ''}<br>
+      ${co.email}${co.pec ? ' | PEC: ' + co.pec : ''}<br>
+      ${co.website ? co.website + ' | ' : ''}C.F./P.Iva: ${co.vat}
+    </div>
+  </div>
+  <div class="ticket-ref">
+    <div class="lbl">Scheda di Assistenza</div>
+    <div class="num">${ticketNum}</div>
+    <div class="lbl">Data ritiro: ${dateStr}</div>
+    <div style="margin-top:4px">
+      <span class="status-pill status-${ticket.outcome === 'repair' ? 'repair' : ticket.outcome === 'not-worth-repairing' ? 'not-worth' : 'pending'}">
+        ${ticket.outcome === 'repair' ? 'In Riparazione' : ticket.outcome === 'not-worth-repairing' ? 'Non Conveniente' : 'Accettato'}
+      </span>
+    </div>
+    <div style="margin-top:6px"><span class="barcode-placeholder">*${ticketNum}*</span></div>
+  </div>
+</div>
+
+<!-- Cliente -->
+<div class="section">
+  <div class="section-title">Cliente</div>
+  <div class="fields">
+    <div class="row">
+      <div class="field field-3"><span class="lbl">Cognome e Nome</span><div class="val">${customerName}</div></div>
+      <div class="field"><span class="lbl">Telefono / GSM</span><div class="val">${ticket.phoneLookup}</div></div>
+      <div class="field field-2"><span class="lbl">eMail</span><div class="val">${ticket.customerEmail ?? customer?.email ?? '—'}</div></div>
+    </div>
+    <div class="row">
+      <div class="field field-3"><span class="lbl">Indirizzo</span><div class="val">—</div></div>
+      <div class="field"><span class="lbl">Cod. Cliente</span><div class="val">${customer?.id ?? ticket.customerId ?? 'PROVVISORIO'}</div></div>
+      <div class="field field-2">${ticket.provisionalCustomer ? '<span class="warn">⚠ Cliente provvisorio — non presente in anagrafica</span>' : ''}</div>
+    </div>
+  </div>
+</div>
+
+<!-- Prodotto -->
+<div class="section">
+  <div class="section-title">Prodotto / Apparecchiatura</div>
+  <div class="fields">
+    <div class="row">
+      <div class="field field-2"><span class="lbl">Categoria</span><div class="val">${ticket.deviceType}</div></div>
+      <div class="field field-2"><span class="lbl">Marca</span><div class="val">${ticket.brand ?? '—'}</div></div>
+      <div class="field field-3"><span class="lbl">Modello</span><div class="val">${ticket.model ?? '—'}</div></div>
+    </div>
+    <div class="row">
+      <div class="field field-2"><span class="lbl">Nr. Serie</span><div class="val">${ticket.serialNumber ?? '—'}</div></div>
+      <div class="field"><span class="lbl">Garanzia</span><div class="val">${ticket.hasWarranty ? 'Sì' : 'No'}</div></div>
+      <div class="field"><span class="lbl">Preventivo € </span><div class="val">${ticket.estimatedPrice != null ? ticket.estimatedPrice.toFixed(2) : '—'}</div></div>
+      <div class="field field-2"><span class="lbl">Segnali / Tag</span><div class="val" style="font-size:10px">${ticket.inferredSignals.join(', ') || '—'}</div></div>
+    </div>
+  </div>
+</div>
+
+<!-- Difetto dichiarato -->
+<div class="section">
+  <div class="section-title">Tipo di Guasto / Difetto Dichiarato</div>
+  <div class="bigtext">${ticket.issue}</div>
+</div>
+
+<!-- Note -->
+${ticket.ticketNotes ? `<div class="section">
+  <div class="section-title">Note Operative</div>
+  <div class="bigtext">${ticket.ticketNotes}</div>
+</div>` : ''}
+
+<!-- Esito -->
+<div class="section">
+  <div class="section-title">Esito Assistenza</div>
+  <div class="fields">
+    <div class="row">
+      <div class="field"><span class="lbl">Esito</span><div class="val">${ticket.diagnosis ?? '—'}</div></div>
+      <div class="field"><span class="lbl">Data Rientro</span><div class="val">&nbsp;</div></div>
+      <div class="field"><span class="lbl">Importo Pagato €</span><div class="val">&nbsp;</div></div>
+      <div class="field"><span class="lbl">Data Riconsegna</span><div class="val">&nbsp;</div></div>
+    </div>
+    <div class="row">
+      <div class="field field-3"><span class="lbl">Note Esito / Riconsegna</span><div class="val" style="min-height:30px">&nbsp;</div></div>
+      <div class="field"><span class="lbl">Richiamato</span><div class="val">&nbsp;</div></div>
+    </div>
+  </div>
+</div>
+
+<!-- Footer firme -->
+<div class="footer">
+  <div class="sig-box">
+    <strong>Firma Cliente</strong><br><br><br>
+    <span style="font-size:9px;color:#aaa">Il cliente dichiara di aver letto e accettato le condizioni di servizio</span>
+  </div>
+  <div class="sig-box">
+    <strong>Operatore</strong><br><br><br>
+    <span style="font-size:9px;color:#aaa">Timbro / Firma</span>
+  </div>
+  <div class="sig-box">
+    <strong>Nota ritiro / privacy</strong><br>
+    <span style="font-size:9px;line-height:1.5">I dati personali sono trattati ai sensi del GDPR 679/2016. La presente scheda costituisce ricevuta di accettazione del bene in assistenza.</span>
+  </div>
+</div>
+
+<div class="no-print" style="margin-top:20px">
+  <button class="print-btn" onclick="window.print()">🖨️ Stampa / Salva PDF</button>
+  <button style="margin-left:12px;background:none;border:1px solid #ccc;padding:10px 18px;border-radius:6px;cursor:pointer" onclick="window.close()">Chiudi</button>
+</div>
+</body>
+</html>`;
+
+    void reply.header('Content-Type', 'text/html; charset=utf-8');
+    return reply.send(html);
   });
 
   return app;
