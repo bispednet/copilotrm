@@ -187,3 +187,60 @@ export interface BusinessAgent {
   supports(eventType: EventType): boolean;
   execute(ctx: OrchestratorContext): AgentExecutionResult;
 }
+
+// ─── AEP Pattern (ispirato a Eliza) ─────────────────────────────────────────
+
+/**
+ * Provider — inietta dati di contesto aggiuntivi prima che gli agenti girino.
+ * Esempio: DaneaDataProvider, RssNewsProvider, RAGKnowledgeProvider.
+ */
+export interface AgentProvider<T = unknown> {
+  name: string;
+  /** Ritorna dati che verranno aggiunti a OrchestratorContext.enrichedData[name] */
+  provide(ctx: OrchestratorContext): Promise<T> | T;
+}
+
+/**
+ * Evaluator — valuta i risultati degli agenti dopo l'esecuzione.
+ * Esempio: SaturationEvaluator, ComplianceEvaluator.
+ */
+export interface AgentEvaluator {
+  name: string;
+  evaluate(
+    ctx: OrchestratorContext,
+    results: AgentExecutionResult[]
+  ): Promise<EvaluationResult> | EvaluationResult;
+}
+
+export interface EvaluationResult {
+  /** Se false, l'orchestrator può decidere di ri-tentare o bloccare */
+  shouldContinue: boolean;
+  notes: string[];
+  /** Boost opzionale di confidence per agente specifico */
+  boosts?: Record<string, number>;
+}
+
+/**
+ * Action — un'azione concreta eseguibile nominata.
+ * Esempio: SendWhatsAppAction, CreateCampaignDraftAction.
+ */
+export interface AgentAction {
+  name: string;
+  /** Ritorna true se l'azione è applicabile per questo candidate + ctx */
+  validate(candidate: ActionCandidate, ctx: OrchestratorContext): boolean;
+  execute(
+    candidate: ActionCandidate,
+    ctx: OrchestratorContext
+  ): Promise<ActionResult> | ActionResult;
+}
+
+export interface ActionResult {
+  success: boolean;
+  message?: string;
+  metadata?: Record<string, unknown>;
+}
+
+/** OrchestratorContext esteso con dati iniettati dai Provider */
+export interface EnrichedOrchestratorContext extends OrchestratorContext {
+  enrichedData: Record<string, unknown>;
+}

@@ -1,5 +1,6 @@
 import cors from '@fastify/cors';
 import Fastify from 'fastify';
+import { createWordPressClientFromEnv } from '@bisp/integrations-wordpress';
 import { AssistanceAgent } from '@bisp/agents-assistance';
 import { ComplianceAgent } from '@bisp/agents-compliance';
 import { ContentAgent } from '@bisp/agents-content';
@@ -1474,6 +1475,51 @@ export function buildServer(state = buildState()) {
       persistOperationalOutput(state, output);
 
       return { ticket, orchestrator: output };
+    }
+  );
+
+  // ── WordPress publish ─────────────────────────────────────────────────────
+  app.post(
+    '/api/content/publish/wordpress',
+    async (req, reply) => {
+      const body = req.body as {
+        title?: string;
+        content?: string;
+        excerpt?: string;
+        status?: 'publish' | 'draft' | 'pending';
+        categories?: number[];
+        tags?: number[];
+        slug?: string;
+      };
+
+      if (!body?.title || !body?.content) {
+        return reply.code(400).send({ error: 'title e content sono obbligatori' });
+      }
+
+      const wp = createWordPressClientFromEnv();
+      if (!wp) {
+        return reply.code(503).send({
+          error: 'WordPress non configurato (WORDPRESS_SITE_URL, WORDPRESS_USERNAME, WORDPRESS_APP_PASSWORD mancanti)',
+        });
+      }
+
+      try {
+        const result = await wp.createPost({
+          title: body.title,
+          content: body.content,
+          excerpt: body.excerpt,
+          status: body.status ?? 'draft',
+          categories: body.categories,
+          tags: body.tags,
+          slug: body.slug,
+        });
+        state.audit.write(makeAuditRecord('content', 'wordpress.post.created', { postId: result.id, link: result.link, status: result.status }));
+        return { ok: true, post: result };
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        state.audit.write(makeAuditRecord('content', 'wordpress.post.failed', { error: message }));
+        return reply.code(502).send({ error: message });
+      }
     }
   );
 
