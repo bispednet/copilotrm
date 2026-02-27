@@ -41,6 +41,8 @@ export interface CustomerProfile {
   conversationNotes: string[];
   consents: ConsentState;
   commercialSaturationScore: number;
+  /** Telegram chat_id per invio diretto (numerico come stringa, es. "123456789") */
+  telegramChatId?: string;
 }
 
 export interface AssistanceTicket {
@@ -96,6 +98,13 @@ export interface CommunicationDraft {
   relatedOfferId?: UUID;
   needsApproval: boolean;
   reason: string;
+  /**
+   * Identificatore canale-specifico del destinatario:
+   *  - Telegram: chat_id (es. "123456789" o "-100123456789" per gruppo/canale)
+   *  - Email: indirizzo email (es. "mario@example.com")
+   *  - WhatsApp: numero in formato E.164 (es. "+39335123456")
+   */
+  recipientRef?: string;
 }
 
 export interface TaskItem {

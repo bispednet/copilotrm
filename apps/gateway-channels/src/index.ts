@@ -79,65 +79,70 @@ app.get('/api/channels/dispatches', async (req, reply) => {
   return res.rows;
 });
 
-app.post<{ Body: { draft: CommunicationDraft } }>('/api/channels/send', async (req, reply) => {
+app.post<{ Body: { draft: CommunicationDraft; recipientRef?: string } }>('/api/channels/send', async (req, reply) => {
   if (authMode === 'header' && !req.headers['x-bisp-role']) return reply.code(401).send({ error: 'Missing x-bisp-role header', authMode });
   if (!isAllowed(req.headers as Record<string, unknown>, authMode, 'outbox:approve')) {
     const auth = resolveAuth(req.headers as Record<string, unknown>, authMode);
     return reply.code(403).send({ error: 'Forbidden', role: auth.role, permission: 'outbox:approve', authMode });
   }
-  const { draft } = req.body;
+  const { draft, recipientRef } = req.body;
   if (!draft?.channel || !draft?.body) return reply.code(400).send({ error: 'draft.channel and draft.body are required' });
+  // recipientRef da body ha priorità su draft.recipientRef
+  const resolvedDraft: CommunicationDraft = recipientRef ? { ...draft, recipientRef } : draft;
   const dispatchId = makeId('dispatch');
   const draftId = draft.id;
 
   try {
-    if (draft.channel === 'telegram') {
-      const res = await telegram.queueOfferMessage(draft);
+    if (resolvedDraft.channel === 'telegram') {
+      const res = await telegram.queueOfferMessage(resolvedDraft);
       await persistDispatch({
         id: dispatchId,
         draftId,
-        channel: draft.channel,
-        status: 'queued',
-        requestPayload: { draft },
-        responsePayload: { queued: res.queued },
+        channel: resolvedDraft.channel,
+        status: res.sent ? 'sent' : 'queued',
+        requestPayload: { draft: resolvedDraft },
+        responsePayload: { queued: res.queued, sent: res.sent, messageId: res.messageId },
+        error: res.error,
       });
       return { mode: 'telegram', dispatchId, result: res };
     }
 
-    if (draft.channel === 'email') {
-      const res = await email.sendOrQueue(draft);
+    if (resolvedDraft.channel === 'email') {
+      const res = await email.sendOrQueue(resolvedDraft);
       await persistDispatch({
         id: dispatchId,
         draftId,
-        channel: draft.channel,
-        status: res.status === 'sent' ? 'sent' : 'queued',
-        requestPayload: { draft },
-        responsePayload: { status: res.status },
+        channel: resolvedDraft.channel,
+        status: res.status === 'sent' ? 'sent' : res.status === 'failed' ? 'failed' : 'queued',
+        requestPayload: { draft: resolvedDraft },
+        responsePayload: { status: res.status, messageId: res.messageId },
+        error: res.error,
       });
       return { mode: 'email', dispatchId, result: res };
     }
 
-    if (draft.channel === 'whatsapp') {
-      const res = await whatsapp.sendOrQueue(draft);
+    if (resolvedDraft.channel === 'whatsapp') {
+      const res = await whatsapp.sendOrQueue(resolvedDraft);
       await persistDispatch({
         id: dispatchId,
         draftId,
-        channel: draft.channel,
-        status: res.status === 'sent' ? 'sent' : 'queued',
-        requestPayload: { draft },
-        responsePayload: { status: res.status, messageId: res.messageId },
+        channel: resolvedDraft.channel,
+        status: res.status === 'sent' ? 'sent' : res.status === 'failed' ? 'failed' : 'queued',
+        requestPayload: { draft: resolvedDraft },
+        responsePayload: { ok: res.ok, status: res.status, messageId: res.messageId },
+        error: res.error,
       });
       return { mode: 'whatsapp', dispatchId, result: res };
     }
 
-    if (['facebook', 'instagram', 'x'].includes(draft.channel)) {
-      const res = await social.publish(draft);
+    if (['facebook', 'instagram', 'x'].includes(resolvedDraft.channel)) {
+      const res = await social.publish(resolvedDraft);
       await persistDispatch({
         id: dispatchId,
         draftId,
-        channel: draft.channel,
+        channel: resolvedDraft.channel,
         status: res.queued ? 'queued' : 'failed',
-        requestPayload: { draft },
+        requestPayload: { draft: resolvedDraft },
         responsePayload: { queued: res.queued, platform: res.platform },
       });
       return { mode: 'social', dispatchId, result: res };
@@ -147,16 +152,16 @@ app.post<{ Body: { draft: CommunicationDraft } }>('/api/channels/send', async (r
     await persistDispatch({
       id: dispatchId,
       draftId,
-      channel: draft.channel,
+      channel: resolvedDraft.channel,
       status: 'failed',
-      requestPayload: { draft },
+      requestPayload: { draft: resolvedDraft },
       responsePayload: {},
       error: message,
     });
     return reply.code(502).send({ error: 'Channel send failed', detail: message, dispatchId });
   }
 
-  return reply.code(400).send({ error: `Unsupported channel ${draft.channel}` });
+  return reply.code(400).send({ error: `Unsupported channel ${resolvedDraft.channel}` });
 });
 
 app.addHook('onClose', async () => {

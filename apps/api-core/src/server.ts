@@ -462,7 +462,7 @@ export function buildServer(state = buildState()) {
         providerResult = { status: res.status };
       } else if (item.draft.channel === 'whatsapp') {
         const res = await state.channels.whatsapp.sendOrQueue(item.draft);
-        externalId = res.messageId;
+        externalId = res.messageId ?? `wa_${item.draft.id}`;
         providerResult = { status: res.status, messageId: res.messageId };
       } else if (['facebook', 'instagram', 'x'].includes(item.draft.channel)) {
         const res = await state.channels.social.publish(item.draft);
@@ -529,7 +529,7 @@ export function buildServer(state = buildState()) {
         providerResult = { status: res.status };
       } else if (item.draft.channel === 'whatsapp') {
         const res = await state.channels.whatsapp.sendOrQueue(item.draft);
-        externalId = res.messageId;
+        externalId = res.messageId ?? `wa_${item.draft.id}`;
         providerResult = { status: res.status, messageId: res.messageId };
       } else if (['facebook', 'instagram', 'x'].includes(item.draft.channel)) {
         const res = await state.channels.social.publish(item.draft);
