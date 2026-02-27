@@ -13,6 +13,7 @@ const telegram = new TelegramChannelAdapter();
 const email = new EmailChannelAdapter();
 const social = new SocialChannelAdapter();
 const whatsapp = new WhatsAppChannelAdapter();
+const apiCoreUrl = `http://localhost:${process.env.PORT_API_CORE ?? 4010}`;
 const persistenceEnabled = /^(postgres|hybrid)$/i.test(process.env.BISPCRM_PERSISTENCE_MODE ?? 'memory');
 const authMode = (process.env.BISPCRM_AUTH_MODE ?? 'header') as 'none' | 'header';
 const pg = persistenceEnabled
@@ -162,6 +163,79 @@ app.post<{ Body: { draft: CommunicationDraft; recipientRef?: string } }>('/api/c
   }
 
   return reply.code(400).send({ error: `Unsupported channel ${resolvedDraft.channel}` });
+});
+
+// ── Inbound webhook: Telegram ─────────────────────────────────────────────
+app.post<{ Body: Record<string, unknown> }>('/api/inbound/telegram', async (req, reply) => {
+  const update = req.body;
+  const message = (update.message ?? update.edited_message) as Record<string, unknown> | undefined;
+  if (!message) return reply.code(200).send({ ok: true, skipped: true });
+  const from = message.from as Record<string, unknown> | undefined;
+  const chat = message.chat as Record<string, unknown> | undefined;
+  const text = String(message.text ?? '').trim();
+  if (!text) return reply.code(200).send({ ok: true, skipped: true });
+
+  const event = {
+    id: `tg_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`,
+    type: 'inbound.whatsapp.received',
+    occurredAt: new Date().toISOString(),
+    payload: {
+      channel: 'telegram',
+      from: String(from?.username ?? from?.id ?? 'unknown'),
+      chatId: String(chat?.id ?? ''),
+      body: text,
+      subject: '',
+    },
+  };
+  try {
+    await fetch(`${apiCoreUrl}/api/orchestrate`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-bisp-role': 'system' },
+      body: JSON.stringify({ event }),
+    });
+  } catch { /* best-effort, Telegram expects 200 */ }
+  return reply.code(200).send({ ok: true });
+});
+
+// ── Inbound webhook: WhatsApp (Meta Cloud API) ────────────────────────────
+app.get<{ Querystring: Record<string, string> }>('/api/inbound/whatsapp', async (req, reply) => {
+  const q = req.query;
+  if (q['hub.verify_token'] === (process.env.WHATSAPP_VERIFY_TOKEN ?? '') && q['hub.challenge']) {
+    return reply.code(200).send(q['hub.challenge']);
+  }
+  return reply.code(403).send({ error: 'invalid verify token' });
+});
+
+app.post<{ Body: Record<string, unknown> }>('/api/inbound/whatsapp', async (req, reply) => {
+  try {
+    const entries = (req.body.entry as unknown[]) ?? [];
+    for (const rawEntry of entries) {
+      const entry = rawEntry as Record<string, unknown>;
+      const changes = (entry.changes as unknown[]) ?? [];
+      for (const rawChange of changes) {
+        const change = rawChange as Record<string, unknown>;
+        const value = change.value as Record<string, unknown> | undefined;
+        const messages = (value?.messages as Array<Record<string, unknown>>) ?? [];
+        for (const msg of messages) {
+          const from = String(msg.from ?? '');
+          const body = String((msg.text as Record<string, unknown> | undefined)?.body ?? '').trim();
+          if (!body) continue;
+          const event = {
+            id: `wa_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`,
+            type: 'inbound.whatsapp.received',
+            occurredAt: new Date().toISOString(),
+            payload: { channel: 'whatsapp', from, body, subject: '' },
+          };
+          await fetch(`${apiCoreUrl}/api/orchestrate`, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json', 'x-bisp-role': 'system' },
+            body: JSON.stringify({ event }),
+          });
+        }
+      }
+    }
+  } catch { /* must respond 200 to Meta */ }
+  return reply.code(200).send({ ok: true });
 });
 
 app.addHook('onClose', async () => {

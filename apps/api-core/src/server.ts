@@ -547,18 +547,37 @@ export function buildServer(state = buildState()) {
         externalId = res.externalId;
         providerResult = { externalId: res.externalId, status: res.status };
       }
-      const updated = state.drafts.update(item.id, { status: 'queued', externalId, sentAt: new Date().toISOString() });
-      state.audit.write(makeAuditRecord('channel-gateway', 'outbox.sent', { outboxId: item.id, channel: item.draft.channel, status: 'queued', externalId }));
+      // Derive real dispatch status from provider response
+      let dispatchStatus: 'queued' | 'sent' = 'queued';
+      if (item.draft.channel === 'telegram') {
+        dispatchStatus = (providerResult as { sent?: boolean }).sent ? 'sent' : 'queued';
+      } else if (item.draft.channel === 'email' || item.draft.channel === 'whatsapp') {
+        dispatchStatus = (providerResult as { status?: string }).status === 'sent' ? 'sent' : 'queued';
+      }
+
+      const updated = state.drafts.update(item.id, { status: dispatchStatus, externalId, sentAt: new Date().toISOString() });
+      state.audit.write(makeAuditRecord('channel-gateway', 'outbox.sent', { outboxId: item.id, channel: item.draft.channel, status: dispatchStatus, externalId }));
       if (updated) void state.postgresMirror.saveOutbox([updated]);
       void state.postgresMirror.saveChannelDispatch(
         buildChannelDispatchRecord({
           draftId: item.id,
           channel: item.draft.channel,
-          status: 'queued',
+          status: dispatchStatus,
           requestPayload: { draft: item.draft },
           responsePayload: { externalId, ...providerResult },
         })
       );
+
+      // Saturation bump: each sent message += 2 points
+      if (item.draft.customerId) {
+        const sentCustomer = state.customers.getById(item.draft.customerId);
+        if (sentCustomer) {
+          sentCustomer.commercialSaturationScore = Math.min(100, sentCustomer.commercialSaturationScore + 2);
+          state.customers.upsert(sentCustomer);
+          void state.postgresMirror.saveCustomer(sentCustomer);
+        }
+      }
+
       return updated;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
