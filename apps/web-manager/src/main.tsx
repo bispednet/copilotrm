@@ -49,6 +49,11 @@ type KPI = {
   outbox: { total: number; pendingApprovals: number; byStatus: Record<string, number>; byChannel: Record<string, number> };
   auditRecords: number;
 };
+type SwarmRun = { id: string; eventType: string; status: string; startedAt: string; finishedAt?: string; agentsInvolved: string[]; topActionScore?: number };
+type SwarmStep = { id: string; agent: string; stepNo: number; status: string; tasksCreated: number; draftsCreated: number; startedAt: string; finishedAt?: string };
+type SwarmMessage = { id: string; fromAgent: string; toAgent?: string; kind: string; content: string; confidence?: number; createdAt: string };
+type SwarmHandoff = { id: string; fromAgent: string; toAgent: string; reason: string; blocking: boolean; requiresApproval: boolean; status: string };
+type SwarmDetail = { run: SwarmRun; steps: SwarmStep[]; messages: SwarmMessage[]; handoffs: SwarmHandoff[] };
 
 function csvToList(value: string): string[] {
   return value.split(',').map((x) => x.trim()).filter(Boolean);
@@ -107,6 +112,10 @@ function App() {
 
   const [scenarioName, setScenarioName] = useState('smartphonePromo');
   const [scenarioResult, setScenarioResult] = useState<Record<string, unknown> | null>(null);
+
+  const [swarmRuns, setSwarmRuns] = useState<SwarmRun[]>([]);
+  const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
+  const [swarmDetail, setSwarmDetail] = useState<SwarmDetail | null>(null);
 
   useEffect(() => {
     localStorage.setItem('copilotrm_manager_theme', themeMode);
@@ -178,6 +187,17 @@ function App() {
     } finally {
       setBusy(false);
     }
+  }
+
+  async function refreshSwarm(): Promise<void> {
+    const runs = await apiFetch('/api/swarm/runs').then((r) => r.json());
+    setSwarmRuns(Array.isArray(runs) ? runs : []);
+  }
+
+  async function loadRunDetail(runId: string): Promise<void> {
+    const detail = await apiFetch(`/api/swarm/runs/${runId}`).then((r) => r.json());
+    setSwarmDetail(detail ?? null);
+    setSelectedRunId(runId);
   }
 
   const nav: Array<{ key: Page; label: string }> = [
@@ -454,6 +474,38 @@ function App() {
           <section className="grid twoCols">
             <article className="card">
               <h2>Swarm Studio</h2>
+              <div className="btnRow">
+                <button onClick={() => void runAction('swarm.refresh', refreshSwarm)} disabled={busy}>Aggiorna runs</button>
+              </div>
+              <div className="tableWrap" style={{ marginTop: 8 }}>
+                <table>
+                  <thead>
+                    <tr><th>Status</th><th>Event</th><th>Agenti</th><th>Score</th><th>Avviato</th><th></th></tr>
+                  </thead>
+                  <tbody>
+                    {swarmRuns.length === 0 && (
+                      <tr><td colSpan={6} style={{ textAlign: 'center', opacity: 0.5 }}>Nessuna run. Esegui uno scenario o chiudi un ticket.</td></tr>
+                    )}
+                    {swarmRuns.map((r) => (
+                      <tr key={r.id} style={{ cursor: 'pointer', background: selectedRunId === r.id ? 'var(--color-accent-subtle, #eef)' : undefined }}
+                        onClick={() => void loadRunDetail(r.id)}>
+                        <td>
+                          <span style={{ fontWeight: 600, color: r.status === 'completed' ? '#2a2' : r.status === 'failed' ? '#c33' : '#b80' }}>
+                            {r.status === 'completed' ? '✓' : r.status === 'failed' ? '✗' : '⏳'} {r.status}
+                          </span>
+                        </td>
+                        <td style={{ fontFamily: 'monospace', fontSize: '0.8em' }}>{r.eventType}</td>
+                        <td style={{ fontSize: '0.8em' }}>{r.agentsInvolved.join(', ')}</td>
+                        <td>{r.topActionScore != null ? r.topActionScore.toFixed(2) : '—'}</td>
+                        <td style={{ fontSize: '0.75em' }}>{new Date(r.startedAt).toLocaleTimeString()}</td>
+                        <td><button className="ghost" onClick={(e) => { e.stopPropagation(); void loadRunDetail(r.id); }}>Dettaglio</button></td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              <hr style={{ margin: '16px 0' }} />
+              <h3>Scenario tester</h3>
               <label>Scenario demo</label>
               <select value={scenarioName} onChange={(e) => setScenarioName(e.target.value)}>
                 <option value="repairNotWorth">repairNotWorth</option>
@@ -466,6 +518,7 @@ function App() {
                 <button onClick={() => void runAction('scenario.run', async () => {
                   const res = await apiFetch(`/api/scenarios/${scenarioName}/run`, { method: 'POST' });
                   setScenarioResult(await res.json());
+                  await refreshSwarm();
                 })} disabled={busy}>Run scenario</button>
                 <button className="ghost" onClick={() => void runAction('orchestrate.custom', async () => {
                   const res = await apiFetch('/api/orchestrate', {
@@ -474,12 +527,71 @@ function App() {
                     body: JSON.stringify({ event: { id: `evt_${Date.now()}`, type: 'manager.objective.updated', occurredAt: new Date().toISOString(), payload: { note: 'manual orchestrate test' } } }),
                   });
                   setScenarioResult(await res.json());
+                  await refreshSwarm();
                 })} disabled={busy}>Run custom event</button>
               </div>
             </article>
             <article className="card">
-              <h3>Swarm output</h3>
-              <pre>{JSON.stringify(scenarioResult ?? {}, null, 2)}</pre>
+              {swarmDetail && selectedRunId ? (
+                <>
+                  <h3>Run {swarmDetail.run.id}</h3>
+                  <p style={{ fontSize: '0.8em', opacity: 0.7 }}>
+                    {swarmDetail.run.eventType} · durata {swarmDetail.run.finishedAt
+                      ? `${((new Date(swarmDetail.run.finishedAt).getTime() - new Date(swarmDetail.run.startedAt).getTime()) / 1000).toFixed(1)}s`
+                      : 'running'}
+                    {swarmDetail.run.topActionScore != null && ` · top score ${swarmDetail.run.topActionScore.toFixed(2)}`}
+                  </p>
+                  <h4>Steps</h4>
+                  <div className="tableWrap">
+                    <table>
+                      <thead><tr><th>#</th><th>Agente</th><th>Status</th><th>Tasks</th><th>Drafts</th></tr></thead>
+                      <tbody>
+                        {swarmDetail.steps.map((s) => (
+                          <tr key={s.id}>
+                            <td>{s.stepNo}</td>
+                            <td style={{ fontWeight: 600 }}>{s.agent}</td>
+                            <td><span style={{ color: s.status === 'completed' ? '#2a2' : s.status === 'failed' ? '#c33' : '#b80' }}>{s.status}</span></td>
+                            <td>{s.tasksCreated}</td>
+                            <td>{s.draftsCreated}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                  <h4 style={{ marginTop: 12 }}>Messaggi</h4>
+                  <div style={{ maxHeight: 200, overflowY: 'auto', fontSize: '0.78em', lineHeight: 1.6 }}>
+                    {swarmDetail.messages.map((m) => (
+                      <div key={m.id} style={{ padding: '3px 0', borderBottom: '1px solid var(--color-border, #eee)' }}>
+                        <span style={{ fontWeight: 700 }}>{m.fromAgent}</span>
+                        {m.toAgent && <span style={{ opacity: 0.6 }}> → {m.toAgent}</span>}
+                        <span style={{ marginLeft: 6, background: m.kind === 'handoff' ? '#ffd' : m.kind === 'decision' ? '#dfd' : '#eee', padding: '1px 4px', borderRadius: 3, fontSize: '0.85em' }}>{m.kind}</span>
+                        <span style={{ marginLeft: 8, opacity: 0.85 }}>{m.content.length > 120 ? m.content.slice(0, 120) + '…' : m.content}</span>
+                      </div>
+                    ))}
+                  </div>
+                  {swarmDetail.handoffs.length > 0 && (
+                    <>
+                      <h4 style={{ marginTop: 12 }}>Handoff chain</h4>
+                      <div style={{ fontSize: '0.8em' }}>
+                        {swarmDetail.handoffs.map((h) => (
+                          <div key={h.id} style={{ padding: '3px 0' }}>
+                            <span style={{ fontWeight: 600 }}>{h.fromAgent}</span>
+                            <span style={{ margin: '0 4px' }}>→</span>
+                            <span style={{ fontWeight: 600 }}>{h.toAgent}</span>
+                            <span style={{ marginLeft: 8, opacity: 0.65 }}>{h.reason}</span>
+                            <span style={{ marginLeft: 6, color: h.status === 'executed' ? '#2a2' : '#b80' }}>· {h.status}</span>
+                          </div>
+                        ))}
+                      </div>
+                    </>
+                  )}
+                </>
+              ) : (
+                <>
+                  <h3>Swarm output scenario</h3>
+                  <pre>{JSON.stringify(scenarioResult ?? {}, null, 2)}</pre>
+                </>
+              )}
             </article>
           </section>
         )}

@@ -1,167 +1,167 @@
-# CopilotRM (Monorepo)
+# CopilotRM
 
-Monorepo TypeScript-first per il progetto CopilotRM AI CRM & Swarm Automation Layer.
+Monorepo TypeScript per un AI CRM & Swarm Automation Layer orientato al retail/assistenza tecnica.
 
-Obiettivi di questo bootstrap:
-- CRM operativo + assist desk + manager objectives
-- orchestrator multi-agent custom TS (separato dai canali)
-- integrazioni incapsulate (Danea, Eliza-derived, canali)
-- audit trail e policy base
-- base pronta per evoluzione on-prem
+---
 
-## Stato
+## Architettura
 
-Questo repository contiene Sprint 0 + una parte sostanziale di Sprint 1/2 (in-memory, API-first):
-- struttura monorepo `pnpm` + `turbo`
-- package dominio/orchestrator/agenti/personas
-- app skeleton (`api-core`, `worker-*`, `web-*`)
-- adapter `integrations-eliza` con pattern persona/plugin e RAG knowledge (adattato)
-- orchestrator rule-based minimale con handoff/scoring/audit
-- API minime per simulare scenari del brief
-- Assist Desk MVP reale (lookup telefono, ticket, cliente provvisorio, outcome -> orchestrator)
-- Task center e outbox con approvazioni / send stub
-- Manager panel API (objectives CRUD base, KPI)
-- Ingest Danea stub + ingest promo -> offerte + orchestrator
-- Campaign preview/launch con targeting one-to-one / one-to-many
-- Consult agent API con varianti, script, allineamento obiettivi, RAG hints
+```
+apps/
+  api-core            API Fastify (orchestrator, CRM, assist desk, admin)
+  gateway-channels    Gateway invio canali (Telegram, Email, WhatsApp)
+  web-assist          UI operatore assistenza (NLP intake, scheda tecnica, STT)
+  web-crm             UI CRM / agente di vendita
+  web-manager         UI manager (obiettivi, KPI, impostazioni)
+  worker-content      Worker content/social pipeline
+  worker-ingest       Worker ingest Danea/promo
+  worker-orchestrator Worker orchestrazione eventi
+  worker-social       Worker pubblicazione social
 
-## Vincoli architetturali rispettati
+packages/
+  shared-types        Tipi dominio condivisi
+  shared-config       Configurazione da env
+  shared-auth / rbac  Auth e autorizzazioni
+  shared-db           Runtime Postgres (migrations, pool)
+  shared-audit        Audit trail
+  shared-logger       Logger strutturato
+  shared-observability Metriche/tracing
+  domain-*            Repository dominio (customers, offers, objectives, ...)
+  orchestrator-*      Scoring, rules, handoff
+  agents-*            Agenti business (assistance, preventivi, hardware, ...)
+  integrations-llm    Client LLM unificato (Ollama/OpenAI/Anthropic/DeepSeek)
+  integrations-*      Adapter canali e servizi esterni
+  personas            Definizioni persona agenti
+  prompts             Prompt builder functions
+```
 
-- Runtime centrale: custom TypeScript
-- Nessun runtime Python centrale
-- Riuso Eliza selettivo e incapsulato in `packages/integrations-eliza`
-- Orchestrator separato dagli adapter canale
-- Personas agenti come file/config (`packages/personas`)
-- Danea prevista in sola lettura (`packages/integrations-danea` stub)
-- Audit trail presente (`packages/shared-audit`)
+---
 
-## Workspace
+## Setup
 
-- `apps/api-core`: API Fastify (skeleton + route demo orchestrator)
-- `apps/worker-orchestrator`: loop eventi/orchestrazione
-- `apps/worker-ingest`: ingest Danea stub (fatture/offerte)
-- `apps/worker-content`: content jobs stub
-- `apps/worker-social`: publishing jobs stub
-- `apps/web-assist`: UI assist desk (skeleton)
-- `apps/web-manager`: UI manager objectives/KPI (skeleton)
-- `apps/web-crm`: UI consult/CRM (skeleton)
-- `apps/gateway-channels`: gateway dedicato invio canali (telegram/email/whatsapp/social)
-- `packages/*`: dominio, orchestrator, agenti, integrazioni, shared
+**Requisiti:** Node 20+, pnpm 9+
 
-## Setup previsto (LAN / no-Docker friendly)
+```bash
+pnpm install
+cp .env.example .env   # compilare con i propri valori
+pnpm build
+pnpm dev:start
+```
 
-1. Installare Node 20+ e `pnpm`.
-2. `pnpm install`
-3. `pnpm build`
-4. Copiare env: `cp .env.example .env` (gia' predisposto in dev locale)
-5. Avvio rapido:
-`pnpm dev:start`
+`dev:start` avvia: `api-core` (:4010) · `gateway-channels` (:4020) · `worker-content`
+· `web-crm` (:5173) · `web-assist` (:5174) · `web-manager` (:5175)
 
-Script utili:
-- `pnpm dev:api`: avvia solo API core con env autoload
-- `pnpm dev:start`: avvia API core + worker-content + gateway-channels
+Se Redis non è attivo su `:6379` lo script fa fallback automatico a `BISPCRM_QUEUE_MODE=inline`.
 
-Entrambi gli script caricano `.env` e, se Redis non e' in ascolto su `:6379`, fanno fallback automatico a `BISPCRM_QUEUE_MODE=inline` per evitare loop di errori `ECONNREFUSED`.
+---
 
-Nota infra:
-- Docker non e' obbligatorio.
-- Se in LAN usate servizi locali (Postgres/Redis installati sul sistema), impostate `DATABASE_URL` / `REDIS_URL` e usate direttamente `pnpm infra:check`.
-- `pnpm infra:up` usa Docker solo se presente; altrimenti fa fallback a verifica servizi locali.
+## Variabili d'ambiente principali
 
-## Scenari E2E target (simulabili via API demo + test)
+Tutte le variabili vivono esclusivamente in `.env` (escluso da git).
+Vedere `.env.example` per la lista completa.
 
-- ticket assistenza -> non conviene riparare -> preventivo notebook
-- ticket assistenza gamer -> proposta connectivity gaming
-- fattura hardware -> prodotto/offerta -> task contenuto
-- promo smartphone bundle -> campagna telefonia
-- email reclamo post-vendita -> customer care + proposta coerente
+| Variabile | Descrizione |
+|---|---|
+| `DATABASE_URL` | PostgreSQL connection string |
+| `REDIS_URL` | Redis URL |
+| `LLM_PROVIDER` | Provider LLM primario: `ollama` \| `openai` \| `anthropic` \| `deepseek` |
+| `LLM_FALLBACK_PROVIDER` | Provider cloud di fallback |
+| `OLLAMA_SERVER_URL` | URL server Ollama locale |
+| `TELEGRAM_BOT_TOKEN` | Token bot Telegram |
+| `SENDGRID_API_KEY` | API key SendGrid per email |
+| `WHATSAPP_API_TOKEN` | Token Meta Cloud API WhatsApp |
+| `COMPANY_NAME` | Ragione sociale (schede assistenza, PDF) |
+| `COPILOTRM_DATA_DIR` | Directory dati runtime (settings, characters) |
 
-## API principali (MVP attuale)
+---
 
-- `GET /health`
-- `GET /api/customers`
-- `GET /api/offers`
-- `GET /api/objectives`
-- `GET /api/audit?type=&actor=`
-- `GET /api/tasks`
-- `PATCH /api/tasks/:taskId`
-- `GET /api/outbox`
-- `POST /api/outbox/:outboxId/approve`
-- `POST /api/outbox/:outboxId/reject`
-- `POST /api/outbox/:outboxId/send`
-- `GET /api/campaigns`
-- `POST /api/campaigns/preview`
-- `POST /api/campaigns/launch`
-- `GET /api/manager/objectives`
-- `POST /api/manager/objectives`
-- `PATCH /api/manager/objectives/:objectiveId`
-- `GET /api/manager/kpi`
-- `GET /api/admin/settings`
-- `PATCH /api/admin/settings/:key`
-- `GET /api/admin/agents`
-- `GET /api/admin/models`
-- `GET /api/admin/model-catalog`
-- `GET /api/admin/channels`
-- `GET /api/admin/rbac`
-- `GET /api/admin/integrations`
-- `POST /api/media/generate`
-- `GET /api/media/jobs`
-- `GET /api/channels/dispatches`
-- `GET /api/system/infra`
-- `POST /api/system/db/migrate`
-- `GET /api/system/db/snapshot`
-- `POST /api/system/db/sync-runtime`
-- `POST /api/system/db/load-runtime`
-- `POST /api/system/queue/enqueue-test`
-- `GET /api/assist/customers/lookup?phone=`
-- `GET /api/assist/tickets`
-- `POST /api/assist/tickets`
-- `POST /api/assist/tickets/:ticketId/outcome`
-- `POST /api/ingest/danea/sync`
-- `POST /api/ingest/promo`
-- `POST /api/consult/proposal`
-- `POST /api/orchestrate`
-- `GET /api/scenarios`
-- `POST /api/scenarios/:name/run`
+## Modalità operative
 
-## Gap noti (richiedono step successivo)
+### Persistence
+| Valore | Comportamento |
+|---|---|
+| `memory` (default) | Tutto in-memory, nessun DB richiesto |
+| `postgres` | Write-through su Postgres (richiede migrazioni) |
 
-- persistenza PostgreSQL full-read/full-write dei repository applicativi (ora c'è write-through mirror best-effort su task/outbox/audit/tickets/offers/objectives/admin_settings)
-- queue Redis/BullMQ business flows completi (worker queue scaffolding presente, pipeline ancora parziale)
-- auth/RBAC on-prem (attuale: assente)
-- integrazione Danea reale read-only (attuale: stub)
-- canali reali WhatsApp/Email/Telegram/Social con audit end-to-end (attuale: adapter stub)
-- UI web complete con workflow operatori (attuale: skeleton collegato alle API)
+### Queue
+| Valore | Comportamento |
+|---|---|
+| `inline` | Azioni sincrone inline |
+| `redis` | BullMQ via Redis |
 
-## Sicurezza (importante)
+### Auth
+| Valore | Comportamento |
+|---|---|
+| `none` | Nessun controllo (solo dev locale) |
+| `header` | Header `x-bisp-role` richiesto |
 
-Durante l'analisi di `/home/funboy/eliza/.env` sono emerse molte chiavi/segreti operativi. È fortemente consigliata la rotazione dei segreti se sono stati condivisi/esposti in log o chat.
+---
 
-## Persistence Mode
+## API principali
 
-- `BISPCRM_PERSISTENCE_MODE=memory` (default): runtime in-memory
-- `BISPCRM_PERSISTENCE_MODE=postgres`: mirror write-through verso Postgres (best-effort; richiede DB + migrazioni)
-- `BISPCRM_PERSISTENCE_MODE=hybrid`: alias operativo a `postgres` per evoluzione futura (read da DB + cache runtime)
-- `BISPCRM_AUTO_LOAD_RUNTIME=true` (default in `postgres`/`hybrid`): tenta il caricamento del runtime da Postgres al boot API
-- `BISPCRM_AUTO_SYNC_ON_CLOSE=true`: sincronizza runtime -> Postgres in shutdown (utile in dev controllato)
+```
+GET  /health
+GET  /api/customers
+GET  /api/offers
+GET  /api/objectives
+GET  /api/tasks
+PATCH /api/tasks/:id
+GET  /api/outbox
+POST /api/outbox/:id/approve
+POST /api/outbox/:id/send
+POST /api/campaigns/preview
+POST /api/campaigns/launch
+GET  /api/manager/objectives
+POST /api/manager/objectives
+GET  /api/manager/kpi
+POST /api/consult/proposal
+POST /api/chat
+GET  /api/assist/tickets
+POST /api/assist/tickets
+POST /api/assist/intake-nlp
+GET  /api/assist/tickets/:id/scheda
+POST /api/assist/tickets/:id/outcome
+POST /api/ingest/danea/sync
+POST /api/ingest/promo
+GET  /api/admin/settings
+PATCH /api/admin/settings/:key
+GET  /api/admin/agents
+GET  /api/admin/models
+GET  /api/admin/channels
+GET  /api/admin/characters
+GET  /api/system/infra
+POST /api/system/db/migrate
+POST /api/orchestrate
+```
 
-## Queue Mode
+---
 
-- `BISPCRM_QUEUE_MODE=inline` (default): invio/azioni inline
-- `BISPCRM_QUEUE_MODE=redis`: abilita enqueue BullMQ via Redis
-- `BISPCRM_QUEUE_SEND_OUTBOX=true`: `POST /api/outbox/:id/send` mette in coda su `social-publish` invece di inviare inline
-- `BISPCRM_QUEUE_ORCHESTRATOR_EVENTS=true`: duplica gli eventi business in `orchestrator-events` (telemetria/worker pipeline)
-- `BISPCRM_QUEUE_CONTENT_TASKS=true`: mette in coda i task `content` su `content-jobs` (oltre alla creazione immediata task/outbox)
-- `BISPCRM_QUEUE_MEDIA_JOBS=true`: mette in coda la generazione media su `media-jobs` (persistita in tabella `media_jobs`)
+## LLM
 
-## Auth Mode (RBAC)
+Provider supportati con strategia **local-first + cloud fallback**:
 
-- `BISPCRM_AUTH_MODE=header` (default): route sensibili protette con header `x-bisp-role`
-- `BISPCRM_AUTH_MODE=none`: bypass RBAC (solo dev)
+- **Ollama** (locale/LAN) — default, nessun costo, latenza rete locale
+- **DeepSeek** — fallback economico
+- **OpenAI** — fallback standard
+- **Anthropic** — fallback alternativo
 
-## Documentazione
+Se il provider primario non risponde (timeout/ECONNREFUSED) si tenta il fallback.
+Se anche il fallback fallisce il sistema usa template string — non crasha mai.
 
-- `docs/eliza-reuse-map.md`: mappa dei componenti Eliza riusabili
-- `docs/architecture/monorepo-structure.md`: struttura e responsabilità
-- `docs/architecture/orchestrator.md`: flusso orchestrator/scoring/handoff
-- `docs/runbooks/local-setup.md`: setup locale senza Docker (Postgres/Redis opzionali)
+---
+
+## Sicurezza
+
+- Tutti i segreti vivono **solo** in `.env` (in `.gitignore`)
+- Il codice sorgente non contiene valori di configurazione, credenziali o dati aziendali
+- `BISPCRM_AUTH_MODE=header` abilita RBAC minimo tramite header `x-bisp-role`
+- I token vanno ruotati periodicamente e dopo ogni eventuale esposizione
+
+---
+
+## Gap noti
+
+- Persistenza Postgres completa (attuale: write-through best-effort)
+- Auth/RBAC completo on-prem
+- Integrazione Danea reale read-only (attuale: stub)
+- UI web complete con workflow operatori (attuale: MVP funzionale)

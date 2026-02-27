@@ -23,6 +23,7 @@
     "@bisp/domain-assistance": "workspace:*",
     "@bisp/domain-communications": "workspace:*",
     "@bisp/domain-customers": "workspace:*",
+    "@bisp/domain-swarm": "workspace:*",
     "@bisp/domain-objectives": "workspace:*",
     "@bisp/domain-offers": "workspace:*",
     "@bisp/integrations-eliza": "workspace:*",

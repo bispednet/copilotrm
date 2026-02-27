@@ -56,6 +56,9 @@ importers:
       '@bisp/domain-offers':
         specifier: workspace:*
         version: link:../../packages/domain-offers
+      '@bisp/domain-swarm':
+        specifier: workspace:*
+        version: link:../../packages/domain-swarm
       '@bisp/integrations-danea':
         specifier: workspace:*
         version: link:../../packages/integrations-danea
@@ -377,6 +380,19 @@ importers:
 
   packages/domain-products: {}
 
+  packages/domain-swarm:
+    dependencies:
+      '@bisp/shared-types':
+        specifier: workspace:*
+        version: link:../shared-types
+    devDependencies:
+      '@types/node':
+        specifier: ^22.9.0
+        version: 22.19.12
+      typescript:
+        specifier: ^5.6.3
+        version: 5.9.3
+
   packages/integrations-danea: {}
 
   packages/integrations-eliza: {}
@@ -397,7 +413,21 @@ importers:
 
   packages/integrations-wordpress: {}
 
-  packages/orchestrator-core: {}
+  packages/orchestrator-core:
+    dependencies:
+      '@bisp/domain-swarm':
+        specifier: workspace:*
+        version: link:../domain-swarm
+      '@bisp/shared-types':
+        specifier: workspace:*
+        version: link:../shared-types
+    devDependencies:
+      '@types/node':
+        specifier: ^22.9.0
+        version: 22.19.12
+      typescript:
+        specifier: ^5.6.3
+        version: 5.9.3
 
   packages/orchestrator-handoffs: {}
 

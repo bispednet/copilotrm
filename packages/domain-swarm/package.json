@@ -1,5 +1,5 @@
 {
-  "name": "@bisp/orchestrator-core",
+  "name": "@bisp/domain-swarm",
   "version": "0.1.0",
   "private": true,
   "type": "module",
@@ -8,11 +8,10 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "dev": "tsc -p tsconfig.json --watch",
-    "lint": "echo 'lint placeholder: orchestrator-core'",
-    "test": "echo 'test placeholder: orchestrator-core'"
+    "lint": "echo 'lint placeholder: domain-swarm'",
+    "test": "echo 'test placeholder: domain-swarm'"
   },
   "dependencies": {
-    "@bisp/domain-swarm": "workspace:*",
     "@bisp/shared-types": "workspace:*"
   },
   "devDependencies": {

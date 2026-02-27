@@ -262,3 +262,59 @@ export interface ActionResult {
 export interface EnrichedOrchestratorContext extends OrchestratorContext {
   enrichedData: Record<string, unknown>;
 }
+
+// ─── Swarm Runtime ────────────────────────────────────────────────────────────
+
+export type SwarmStatus = 'running' | 'completed' | 'failed' | 'partial';
+export type SwarmMessageKind = 'observation' | 'proposal' | 'handoff' | 'decision' | 'error';
+
+export interface SwarmRun {
+  id: UUID;
+  eventId: string;
+  eventType: string;
+  customerId?: UUID;
+  status: SwarmStatus;
+  startedAt: string;
+  finishedAt?: string;
+  topActionId?: string;
+  topActionScore?: number;
+  agentsInvolved: string[];
+}
+
+export interface SwarmStep {
+  id: UUID;
+  runId: UUID;
+  agent: string;
+  stepNo: number;
+  inputSummary?: string;
+  tasksCreated: number;
+  draftsCreated: number;
+  startedAt: string;
+  finishedAt?: string;
+  status: 'running' | 'completed' | 'failed';
+}
+
+export interface SwarmMessage {
+  id: UUID;
+  runId: UUID;
+  stepNo: number;
+  fromAgent: string;
+  toAgent?: string;
+  kind: SwarmMessageKind;
+  content: string;
+  confidence?: number;
+  createdAt: string;
+}
+
+export interface SwarmHandoff {
+  id: UUID;
+  runId: UUID;
+  fromAgent: string;
+  toAgent: string;
+  reason: string;
+  sourceActionId?: string;
+  blocking: boolean;
+  requiresApproval: boolean;
+  status: 'pending' | 'executed' | 'skipped';
+  createdAt: string;
+}

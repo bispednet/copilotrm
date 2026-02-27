@@ -26,6 +26,7 @@
       "@bisp/domain-objectives": ["packages/domain-objectives/src"],
       "@bisp/domain-campaigns": ["packages/domain-campaigns/src"],
       "@bisp/domain-communications": ["packages/domain-communications/src"],
+      "@bisp/domain-swarm": ["packages/domain-swarm/src"],
       "@bisp/orchestrator-core": ["packages/orchestrator-core/src"],
       "@bisp/orchestrator-rules": ["packages/orchestrator-rules/src"],
       "@bisp/orchestrator-handoffs": ["packages/orchestrator-handoffs/src"],

@@ -23,6 +23,7 @@ import { SocialChannelAdapter } from '@bisp/integrations-social';
 import { TelegramChannelAdapter } from '@bisp/integrations-telegram';
 import { WhatsAppChannelAdapter } from '@bisp/integrations-whatsapp';
 import { CopilotRMOrchestrator } from '@bisp/orchestrator-core';
+import { SwarmRuntime } from '@bisp/domain-swarm';
 import { AuditTrail, makeAuditRecord } from '@bisp/shared-audit';
 import { PgRuntime } from '@bisp/shared-db';
 import type {
@@ -81,6 +82,7 @@ export interface ApiState {
   postgresMirror: PostgresMirror;
   queueGateway: QueueGateway;
   llm: LLMClient | null;
+  swarmRuntime: SwarmRuntime;
 }
 
 export function buildState(seed?: { customers?: CustomerProfile[]; offers?: ProductOffer[]; objectives?: ManagerObjective[] }): ApiState {
@@ -159,6 +161,7 @@ export function buildState(seed?: { customers?: CustomerProfile[]; offers?: Prod
     postgresMirror,
     queueGateway,
     llm,
+    swarmRuntime: new SwarmRuntime(),
   };
 }
 
@@ -1124,15 +1127,16 @@ export function buildServer(state = buildState()) {
       void state.queueGateway.enqueueOrchestrator(event);
     }
     const customer = event.customerId ? state.customers.getById(event.customerId) : undefined;
-    const output = state.orchestrator.run({
+    const ctx = {
       event,
       customer,
       activeObjectives: state.objectives.listActive(),
       activeOffers: state.offers.listActive(),
       now: new Date().toISOString(),
-    });
+    };
+    const { output, runId } = await state.orchestrator.runSwarm(ctx, state.swarmRuntime);
     persistOperationalOutput(state, output);
-    return output;
+    return { ...output, swarmRunId: runId };
   });
 
   app.get('/api/manager/objectives', async () => state.objectives.listAll());
@@ -1490,16 +1494,17 @@ export function buildServer(state = buildState()) {
       }
 
       const customer = event.customerId ? state.customers.getById(event.customerId) : undefined;
-      const output = state.orchestrator.run({
+      const ctx = {
         event,
         customer,
         activeObjectives: state.objectives.listActive(),
         activeOffers: state.offers.listActive(),
         now: new Date().toISOString(),
-      });
+      };
+      const { output, runId } = await state.orchestrator.runSwarm(ctx, state.swarmRuntime);
       persistOperationalOutput(state, output);
 
-      return { ticket, orchestrator: output };
+      return { ticket, orchestrator: output, swarmRunId: runId };
     }
   );
 
@@ -1872,6 +1877,33 @@ ${ticket.ticketNotes ? `<div class="section">
 
     void reply.header('Content-Type', 'text/html; charset=utf-8');
     return reply.send(html);
+  });
+
+  // ── Swarm endpoints ────────────────────────────────────────────────────────
+  app.get('/api/swarm/runs', async () => state.swarmRuntime.listRuns(50));
+
+  app.get<{ Params: { runId: string } }>('/api/swarm/runs/:runId', async (req, reply) => {
+    const run = state.swarmRuntime.getRun(req.params.runId);
+    if (!run) return reply.code(404).send({ error: 'Run not found' });
+    return state.swarmRuntime.snapshot(req.params.runId);
+  });
+
+  app.get<{ Params: { runId: string } }>('/api/swarm/runs/:runId/messages', async (req, reply) => {
+    const run = state.swarmRuntime.getRun(req.params.runId);
+    if (!run) return reply.code(404).send({ error: 'Run not found' });
+    return state.swarmRuntime.listMessages(req.params.runId);
+  });
+
+  app.get<{ Params: { runId: string } }>('/api/swarm/runs/:runId/steps', async (req, reply) => {
+    const run = state.swarmRuntime.getRun(req.params.runId);
+    if (!run) return reply.code(404).send({ error: 'Run not found' });
+    return state.swarmRuntime.listSteps(req.params.runId);
+  });
+
+  app.get<{ Params: { runId: string } }>('/api/swarm/runs/:runId/handoffs', async (req, reply) => {
+    const run = state.swarmRuntime.getRun(req.params.runId);
+    if (!run) return reply.code(404).send({ error: 'Run not found' });
+    return state.swarmRuntime.listHandoffs(req.params.runId);
   });
 
   return app;
