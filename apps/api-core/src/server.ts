@@ -22,6 +22,7 @@ import { MediaGenerationServiceStub } from '@bisp/integrations-media';
 import { SocialChannelAdapter } from '@bisp/integrations-social';
 import { TelegramChannelAdapter } from '@bisp/integrations-telegram';
 import { WhatsAppChannelAdapter } from '@bisp/integrations-whatsapp';
+import { HardwareQuoteChain } from '@bisp/integrations-hardware';
 import { CopilotRMOrchestrator } from '@bisp/orchestrator-core';
 import { SwarmRuntime } from '@bisp/domain-swarm';
 import { AgentDiscussion } from '@bisp/agent-bus';
@@ -31,6 +32,7 @@ import type {
   AssistanceTicket,
   CommunicationDraft,
   ContentCard,
+  CustomerInteraction,
   CustomerProfile,
   DomainEvent,
   ManagerObjective,
@@ -56,6 +58,7 @@ import {
   consultProposal,
   makeId,
   targetCustomersForOffer,
+  validateDraftRecipient,
 } from './services';
 
 export interface ApiState {
@@ -87,6 +90,7 @@ export interface ApiState {
   queueGateway: QueueGateway;
   llm: LLMClient | null;
   swarmRuntime: SwarmRuntime;
+  hardwareQuote: HardwareQuoteChain;
 }
 
 export function buildState(seed?: { customers?: CustomerProfile[]; offers?: ProductOffer[]; objectives?: ManagerObjective[] }): ApiState {
@@ -170,6 +174,7 @@ export function buildState(seed?: { customers?: CustomerProfile[]; offers?: Prod
     queueGateway,
     llm,
     swarmRuntime: new SwarmRuntime(),
+    hardwareQuote: new HardwareQuoteChain(),
   };
 }
 
@@ -891,6 +896,14 @@ export function buildServer(state = buildState()) {
   app.get('/health', async () => ({ ok: true, service: 'api-core', ts: new Date().toISOString() }));
 
   app.get('/api/customers', async () => state.customers.list());
+
+  app.get<{ Params: { id: string } }>('/api/customers/:id/interactions', async (req, reply) => {
+    if (ensurePermission(req, reply, 'customers:lookup') === null) return;
+    const customer = state.customers.getById(req.params.id);
+    if (!customer) return reply.code(404).send({ error: 'Customer not found' });
+    return customer.interactions ?? [];
+  });
+
   app.get('/api/datahub/overview', async () => {
     const customers = state.customers.list();
     const offers = state.offers.listAll();
@@ -1006,6 +1019,10 @@ export function buildServer(state = buildState()) {
     if (!item) return reply.code(404).send({ error: 'Outbox item not found' });
     if (item.status === 'pending-approval') return reply.code(409).send({ error: 'Approval required' });
 
+    // Valida destinatario prima di procedere
+    const recipientError = validateDraftRecipient(item.draft, { telegramChannelId: process.env.TELEGRAM_CHANNEL_ID_APPROVE_POST });
+    if (recipientError) return reply.code(422).send({ error: recipientError });
+
     const queueSend = /^(1|true|yes|on)$/i.test(String(process.env.BISPCRM_QUEUE_SEND_OUTBOX ?? 'false'));
     if (queueSend) {
       const queued = await state.queueGateway.enqueueSocial(item.draft);
@@ -1063,6 +1080,16 @@ export function buildServer(state = buildState()) {
           responsePayload: { externalId, ...providerResult },
         })
       );
+      if (item.draft.customerId) {
+        state.customers.addInteraction(item.draft.customerId, {
+          id: makeId('int'),
+          type: 'draft.sent',
+          channel: item.draft.channel,
+          summary: `Draft inviato via ${item.draft.channel}: ${item.draft.subject ?? item.draft.body.slice(0, 60)}...`,
+          relatedOfferId: item.draft.relatedOfferId,
+          createdAt: new Date().toISOString(),
+        });
+      }
       return updated;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -1084,6 +1111,11 @@ export function buildServer(state = buildState()) {
     if (ensurePermission(req, reply, 'outbox:approve') === null) return;
     const item = state.drafts.getById(req.params.outboxId);
     if (!item) return reply.code(404).send({ error: 'Outbox item not found' });
+
+    // Valida destinatario prima di approvare+inviare
+    const approveSendRecipientError = validateDraftRecipient(item.draft, { telegramChannelId: process.env.TELEGRAM_CHANNEL_ID_APPROVE_POST });
+    if (approveSendRecipientError) return reply.code(422).send({ error: approveSendRecipientError });
+
     if (item.status === 'pending-approval') {
       state.drafts.update(item.id, {
         status: 'approved',
@@ -1145,6 +1177,14 @@ export function buildServer(state = buildState()) {
           state.customers.upsert(sentCustomer);
           void state.postgresMirror.saveCustomer(sentCustomer);
         }
+        state.customers.addInteraction(item.draft.customerId, {
+          id: makeId('int'),
+          type: 'draft.sent',
+          channel: item.draft.channel,
+          summary: `Draft approvato e inviato via ${item.draft.channel}: ${item.draft.subject ?? item.draft.body.slice(0, 60)}...`,
+          relatedOfferId: item.draft.relatedOfferId,
+          createdAt: new Date().toISOString(),
+        });
       }
 
       return updated;
@@ -1344,6 +1384,54 @@ export function buildServer(state = buildState()) {
     void state.postgresMirror.saveAdminSetting(next);
     return { ...next, value: current.type === 'secret' ? 'updated' : next.value };
   });
+  // ─── /api/admin/env-status — stato integrazioni (solo configured/not, no valori) ──
+  const ENV_STATUS_CATALOG = [
+    // LLM
+    { key: 'OLLAMA_SERVER_URL', category: 'llm', label: 'Ollama URL' },
+    { key: 'OPENAI_API_KEY', category: 'llm', label: 'OpenAI API Key' },
+    { key: 'ANTHROPIC_API_KEY', category: 'llm', label: 'Anthropic API Key' },
+    { key: 'DEEPSEEK_API_KEY', category: 'llm', label: 'DeepSeek API Key' },
+    // Telegram
+    { key: 'TELEGRAM_BOT_TOKEN', category: 'telegram', label: 'Telegram Bot Token' },
+    { key: 'TELEGRAM_ALLOWED_CHAT_IDS', category: 'telegram', label: 'Chat IDs autorizzati' },
+    // Email
+    { key: 'EMAIL_SMTP_HOST', category: 'email', label: 'SMTP Host' },
+    { key: 'GMAIL_CLIENT_ID', category: 'email', label: 'Gmail Client ID' },
+    { key: 'SENDGRID_API_KEY', category: 'email', label: 'SendGrid API Key' },
+    // WhatsApp
+    { key: 'WHATSAPP_PROVIDER', category: 'whatsapp', label: 'Provider' },
+    { key: 'WHATSAPP_API_TOKEN', category: 'whatsapp', label: 'Token API' },
+    // WordPress
+    { key: 'WP_API_URL', category: 'wordpress', label: 'WordPress URL' },
+    { key: 'WP_API_TOKEN', category: 'wordpress', label: 'Token API' },
+    // Hardware
+    { key: 'AMAZON_PAAPI_ACCESS_KEY', category: 'hardware', label: 'Amazon PA-API Access Key' },
+    { key: 'INGRAM_CLIENT_ID', category: 'hardware', label: 'Ingram Micro Client ID' },
+    { key: 'RUNNER_API_KEY', category: 'hardware', label: 'Runner.it API Key' },
+    { key: 'NEXTHS_API_KEY', category: 'hardware', label: 'Nexths API Key' },
+    { key: 'ESPRINET_CLIENT_ID', category: 'hardware', label: 'Esprinet Client ID' },
+    // Danea
+    { key: 'DANEA_EASYFATT_DB_PATH', category: 'danea', label: 'Danea DB Path' },
+    // Social
+    { key: 'TWITTER_BEARER_TOKEN', category: 'social', label: 'X/Twitter Token' },
+    { key: 'INSTAGRAM_ACCESS_TOKEN', category: 'social', label: 'Instagram Token' },
+    // Company / System
+    { key: 'COMPANY_NAME', category: 'company', label: 'Nome azienda' },
+    { key: 'COPILOTRM_DATA_DIR', category: 'system', label: 'Data directory' },
+    { key: 'BISPCRM_PERSISTENCE_MODE', category: 'system', label: 'Persistence mode' },
+    { key: 'BISPCRM_QUEUE_MODE', category: 'system', label: 'Queue mode' },
+  ] as const;
+
+  app.get('/api/admin/env-status', async (req, reply) => {
+    if (ensurePermission(req, reply, 'settings:write') === null) return;
+    return ENV_STATUS_CATALOG.map((e) => ({
+      key: e.key,
+      category: e.category,
+      label: e.label,
+      configured: Boolean(process.env[e.key]?.trim()),
+    }));
+  });
+
   app.get('/api/admin/characters', async (req, reply) => {
     if (ensurePermission(req, reply, 'settings:write') === null) return;
     return state.characterStudio.list();
@@ -1431,7 +1519,7 @@ export function buildServer(state = buildState()) {
         telegram: { mode: 'real', enabled: !!process.env.TELEGRAM_BOT_TOKEN },
         email: { mode: 'real', enabled: !!process.env.SENDGRID_API_KEY },
         whatsapp: { mode: 'real', enabled: !!process.env.WHATSAPP_API_TOKEN },
-        social: { mode: 'stub', enabled: false },
+        social: { mode: 'real', enabled: !!(process.env.FACEBOOK_PAGE_ACCESS_TOKEN || process.env.TWITTER_BEARER_TOKEN || process.env.INSTAGRAM_ACCESS_TOKEN) },
         media: { mode: 'service-layer-stub', enabled: true },
       },
       queue: await state.queueGateway.snapshot(),
@@ -1709,12 +1797,18 @@ export function buildServer(state = buildState()) {
       void state.queueGateway.enqueueOrchestrator(event);
     }
     const customer = event.customerId ? state.customers.getById(event.customerId) : undefined;
+    const orchCustomerId = event.customerId;
     const ctx = {
       event,
       customer,
       activeObjectives: state.objectives.listActive(),
       activeOffers: state.offers.listActive(),
       now: new Date().toISOString(),
+      onInteraction: orchCustomerId
+        ? (interaction: Omit<CustomerInteraction, 'customerId'>) => {
+            state.customers.addInteraction(orchCustomerId, interaction);
+          }
+        : undefined,
     };
     const { output, runId } = await state.orchestrator.runSwarm(ctx, state.swarmRuntime);
     persistOperationalOutput(state, output);
@@ -1728,6 +1822,15 @@ export function buildServer(state = buildState()) {
     state.objectives.upsert(req.body);
     state.audit.write(makeAuditRecord('manager', 'objective.upserted', { objectiveId: req.body.id, name: req.body.name }));
     void state.postgresMirror.saveObjective(req.body);
+    // Emetti evento se obiettivo attivo — content + preventivi si allineano
+    if (req.body.active) {
+      const objEvent: DomainEvent = { id: makeId('evt'), type: 'manager.objective.updated', occurredAt: new Date().toISOString(), payload: { objectiveId: req.body.id, name: req.body.name, active: true } };
+      const objCtx = { event: objEvent, activeObjectives: state.objectives.listActive(), activeOffers: state.offers.listActive(), now: new Date().toISOString() };
+      void state.orchestrator.runSwarm(objCtx, state.swarmRuntime).then(({ output, runId }) => {
+        persistOperationalOutput(state, output);
+        void broadcastSwarmDebug(state, runId, objEvent.type, output.tasks.length, output.drafts.length);
+      }).catch(() => undefined);
+    }
     return reply.code(201).send(req.body);
   });
   app.patch<{ Params: { objectiveId: string }; Body: Partial<ManagerObjective> }>('/api/manager/objectives/:objectiveId', async (req, reply) => {
@@ -1760,6 +1863,15 @@ export function buildServer(state = buildState()) {
     state.objectives.upsert(merged);
     state.audit.write(makeAuditRecord('manager', 'objective.activation.updated', { objectiveId: merged.id, active: merged.active }));
     void state.postgresMirror.saveObjective(merged);
+    // Emetti evento su attivazione — agenti si allineano agli obiettivi aggiornati
+    if (merged.active) {
+      const objEvent: DomainEvent = { id: makeId('evt'), type: 'manager.objective.updated', occurredAt: new Date().toISOString(), payload: { objectiveId: merged.id, name: merged.name, active: true } };
+      const objCtx = { event: objEvent, activeObjectives: state.objectives.listActive(), activeOffers: state.offers.listActive(), now: new Date().toISOString() };
+      void state.orchestrator.runSwarm(objCtx, state.swarmRuntime).then(({ output, runId }) => {
+        persistOperationalOutput(state, output);
+        void broadcastSwarmDebug(state, runId, objEvent.type, output.tasks.length, output.drafts.length);
+      }).catch(() => undefined);
+    }
     return merged;
   });
   app.delete<{ Params: { objectiveId: string } }>('/api/manager/objectives/:objectiveId', async (req, reply) => {
@@ -2099,6 +2211,16 @@ export function buildServer(state = buildState()) {
           state.customers.upsert(linkedCustomer);
           void state.postgresMirror.saveCustomer(linkedCustomer);
         }
+        // Registra interazione strutturata
+        state.customers.addInteraction(ticket.customerId, {
+          id: makeId('int'),
+          type: 'ticket.closed',
+          channel: 'assist',
+          agentName: 'assistance',
+          summary: `Ticket ${ticket.deviceType}: ${ticket.outcome ?? 'pending'}${ticket.inferredSignals.length ? ` | ${ticket.inferredSignals.join(', ')}` : ''}`,
+          relatedTicketId: ticket.id,
+          createdAt: new Date().toISOString(),
+        });
       }
 
       state.audit.write(
@@ -2128,12 +2250,18 @@ export function buildServer(state = buildState()) {
       }
 
       const customer = event.customerId ? state.customers.getById(event.customerId) : undefined;
+      const ticketCustomerId = event.customerId;
       const ctx = {
         event,
         customer,
         activeObjectives: state.objectives.listActive(),
         activeOffers: state.offers.listActive(),
         now: new Date().toISOString(),
+        onInteraction: ticketCustomerId
+          ? (interaction: Omit<CustomerInteraction, 'customerId'>) => {
+              state.customers.addInteraction(ticketCustomerId, interaction);
+            }
+          : undefined,
       };
       const { output, runId } = await state.orchestrator.runSwarm(ctx, state.swarmRuntime);
       persistOperationalOutput(state, output);
@@ -2224,7 +2352,44 @@ export function buildServer(state = buildState()) {
       });
       if (!card) return reply.code(404).send({ error: 'Card not found' });
       state.audit.write(makeAuditRecord('content', 'content_card.approved', { cardId: card.id, title: card.title }));
-      return card;
+
+      // Pubblica sui canali configurati (best-effort — errori loggati in audit)
+      const publishedTo: string[] = [];
+
+      const tgChannelId = process.env.TELEGRAM_CHANNEL_ID_APPROVE_POST;
+      if (tgChannelId && card.telegramDraft) {
+        try {
+          await state.channels.telegram.sendMessage(tgChannelId, card.telegramDraft, { parseMode: 'HTML' });
+          publishedTo.push('telegram');
+          state.audit.write(makeAuditRecord('content', 'content_card.published.telegram', { cardId: card.id }));
+        } catch (err) {
+          state.audit.write(makeAuditRecord('content', 'content_card.publish.telegram.failed', { cardId: card.id, error: String(err) }));
+        }
+      }
+
+      if (card.blogDraft) {
+        const wp = createWordPressClientFromEnv();
+        if (wp) {
+          try {
+            if (card.wpDraftId) {
+              await wp.updatePost(parseInt(card.wpDraftId, 10), { status: 'publish' });
+            } else {
+              const result = await wp.createPost({ title: card.title, content: card.blogDraft, excerpt: card.hook, status: 'publish' });
+              state.contentCards.update(card.id, { wpDraftId: result.id.toString() });
+            }
+            publishedTo.push('wordpress');
+            state.audit.write(makeAuditRecord('content', 'content_card.published.wordpress', { cardId: card.id }));
+          } catch (err) {
+            state.audit.write(makeAuditRecord('content', 'content_card.publish.wordpress.failed', { cardId: card.id, error: String(err) }));
+          }
+        }
+      }
+
+      if (publishedTo.length > 0) {
+        state.contentCards.update(card.id, { publishedAt: new Date().toISOString(), publishedTo });
+      }
+
+      return state.contentCards.getById(card.id) ?? card;
     }
   );
 
@@ -2379,6 +2544,19 @@ export function buildServer(state = buildState()) {
       // ── Salva conversazione ───────────────────────────────────────────────
       state.conversations.addMessage({ id: makeId('cmsg'), sessionId, role: 'assistant', content: synthesis, swarmThread, swarmRunId: swarmRunId ?? undefined, createdAt: new Date().toISOString() });
       state.audit.write(makeAuditRecord('chat', 'chat.response', { customerId: customer?.id ?? null, sessionId, swarmRunId, agentsInvolved: [...new Set(swarmThread.map((m) => m.agent))] }));
+
+      // Registra interazione cliente se il cliente è identificato
+      if (customer?.id) {
+        state.customers.addInteraction(customer.id, {
+          id: makeId('int'),
+          type: 'chat.message',
+          channel: 'crm',
+          agentName: swarmThread[swarmThread.length - 1]?.agent ?? 'copilot',
+          summary: `Consulenza chat: "${message.slice(0, 80)}"`,
+          relatedRunId: swarmRunId ?? undefined,
+          createdAt: new Date().toISOString(),
+        });
+      }
 
       send({ type: 'done', synthesis, swarmRunId, sessionId, customer: customerData });
 
@@ -2697,6 +2875,28 @@ ${ticket.ticketNotes ? `<div class="section">
     if (!run) return reply.code(404).send({ error: 'Run not found' });
     return state.swarmRuntime.listHandoffs(req.params.runId);
   });
+
+  // ── Hardware quote chain ───────────────────────────────────────────────────
+  // GET /api/hardware/quote?q=Samsung+Galaxy+S24&category=smartphone&max=5
+  // Cerca in parallelo su: Runner → Amazon → Nexths → Esprinet → Ingram
+  // I fornitori non configurati restituiscono searchUrl per accesso manuale.
+
+  app.get<{ Querystring: { q?: string; category?: string; max?: string } }>(
+    '/api/hardware/quote',
+    async (req, reply) => {
+      const { q, category, max } = req.query;
+      if (!q?.trim()) return reply.code(400).send({ error: 'Parametro q obbligatorio (es. ?q=Samsung+Galaxy+S24)' });
+      const result = await state.hardwareQuote.search({
+        query: q.trim(),
+        category,
+        maxResults: max ? Math.min(Number(max), 20) : 5,
+      });
+      return result;
+    }
+  );
+
+  // GET /api/hardware/suppliers — stato configurazione fornitori
+  app.get('/api/hardware/suppliers', async () => state.hardwareQuote.suppliers());
 
   return app;
 }

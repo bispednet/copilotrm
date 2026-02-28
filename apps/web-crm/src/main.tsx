@@ -42,6 +42,13 @@ const AGENT_COLORS: Record<string, { bg: string; border: string; icon: string }>
 };
 const DEFAULT_COLOR = { bg: '#1f293722', border: '#94a3b8', icon: '🤖' };
 
+/** Returns an HSL color from red (0) → amber → green (max). max=1 for 0-1 scores, pass the list max for additive scores. */
+function scoreColor(score: number, max = 1): string {
+  const ratio = Math.min(score / Math.max(max, 0.001), 1);
+  const hue = Math.round(ratio * 120); // 0=red 60=amber 120=green
+  return `hsl(${hue}, 72%, 44%)`;
+}
+
 const KIND_LABEL: Record<SwarmThreadMsg['kind'], string> = {
   brief:     'Brief',
   analysis:  'Analisi',
@@ -463,14 +470,36 @@ function App() {
                         </li>
                       ))}
                     </ul>
-                    <h3>Script WhatsApp</h3>
-                    <pre style={{ fontSize: 11, maxHeight: 160 }}>{JSON.stringify(consultResult.scripts.whatsapp, null, 2)}</pre>
+                    <h3>Script</h3>
+                    {(['whatsapp', 'call'] as const).map(ch => {
+                      const entries = Object.entries(consultResult.scripts[ch] ?? {});
+                      if (!entries.length) return null;
+                      return (
+                        <div key={ch} style={{ marginBottom: 10 }}>
+                          <p className="muted" style={{ fontSize: 12, marginBottom: 4 }}>{ch === 'whatsapp' ? '📱 WhatsApp' : '📞 Chiamata'}</p>
+                          {entries.map(([tone, text]) => (
+                            <div key={tone} style={{ border: '1px solid var(--line)', borderRadius: 6, padding: '8px 10px', marginBottom: 6, position: 'relative' }}>
+                              <span style={{ fontSize: 11, textTransform: 'capitalize', fontWeight: 600, color: 'var(--muted)' }}>{tone}</span>
+                              <p style={{ margin: '4px 0 0', fontSize: 13, lineHeight: 1.5 }}>{text}</p>
+                              <button className="ghost" style={{ position: 'absolute', top: 6, right: 6, fontSize: 10, padding: '1px 6px' }} onClick={() => void navigator.clipboard.writeText(text)}>Copia</button>
+                            </div>
+                          ))}
+                        </div>
+                      );
+                    })}
+                    <details style={{ marginTop: 4 }}>
+                      <summary className="muted" style={{ cursor: 'pointer', fontSize: 11 }}>JSON grezzo</summary>
+                      <pre style={{ fontSize: 10, marginTop: 4, maxHeight: 160 }}>{JSON.stringify(consultResult.scripts, null, 2)}</pre>
+                    </details>
                     {consultResult.ragHints.length > 0 && (
                       <>
                         <h3>RAG hints ({consultResult.ragHints.length})</h3>
                         <ul style={{ fontSize: 12 }}>
                           {consultResult.ragHints.slice(0, 3).map((h) => (
-                            <li key={h.docId}>{h.text} <span className="muted">(score: {h.score.toFixed(2)})</span></li>
+                            <li key={h.docId} style={{ display: 'flex', alignItems: 'baseline', gap: 6 }}>
+                              <span style={{ fontWeight: 700, fontSize: 10, background: scoreColor(h.score), color: '#fff', borderRadius: 4, padding: '1px 6px', flexShrink: 0 }}>{h.score.toFixed(2)}</span>
+                              {h.text}
+                            </li>
                           ))}
                         </ul>
                       </>
@@ -527,13 +556,65 @@ function App() {
                 {campaignPreview && (
                   <>
                     <h3>Preview targeting</h3>
-                    <pre style={{ fontSize: 11, maxHeight: 200 }}>{JSON.stringify(campaignPreview, null, 2)}</pre>
+                    <div style={{ marginBottom: 10 }}>
+                      <strong>{(campaignPreview as any).offer?.title ?? '—'}</strong>
+                      {(campaignPreview as any).offer?.category && (
+                        <span className="muted" style={{ fontSize: 12, marginLeft: 8 }}>{(campaignPreview as any).offer.category}</span>
+                      )}
+                      <span className="muted" style={{ fontSize: 12, marginLeft: 8 }}>· seg. <code style={{ fontSize: 11 }}>{(campaignPreview as any).segment ?? '—'}</code></span>
+                    </div>
+                    {(() => {
+                      const tgt = (campaignPreview as any).targeting as Array<{ customerId: string; fullName: string; score: number; reasons?: string[] }>;
+                      const maxScore = tgt?.length ? Math.max(...tgt.map(t => t.score)) : 1;
+                      return (
+                        <>
+                          <p style={{ fontSize: 13, margin: '0 0 4px' }}>👥 <strong>{tgt?.length ?? 0}</strong> clienti nel target</p>
+                          <ul className="stacked" style={{ maxHeight: 150, overflowY: 'auto', marginBottom: 8 }}>
+                            {tgt?.map(t => (
+                              <li key={t.customerId} style={{ flexDirection: 'column', alignItems: 'flex-start', gap: 1 }}>
+                                <span style={{ fontWeight: 600, fontSize: 13 }}>{t.fullName}</span>
+                                <span style={{ fontSize: 11, display: 'flex', alignItems: 'center', gap: 4, color: 'var(--muted)' }}>
+                                  <span style={{ fontWeight: 700, fontSize: 10, background: scoreColor(t.score, maxScore), color: '#fff', borderRadius: 4, padding: '1px 6px', letterSpacing: '0.03em' }}>{t.score.toFixed(1)}</span>
+                                  {t.reasons?.join(' · ')}
+                                </span>
+                              </li>
+                            ))}
+                          </ul>
+                        </>
+                      );
+                    })()}
+                    <div style={{ display: 'flex', gap: 16, fontSize: 13, marginBottom: 8 }}>
+                      <span>📨 1:1: <strong>{((campaignPreview as any).drafts?.oneToOne as unknown[])?.length ?? 0} draft</strong></span>
+                      <span>📢 1:N: <strong>{((campaignPreview as any).drafts?.oneToMany as unknown[])?.length ?? 0} draft</strong></span>
+                    </div>
+                    <details>
+                      <summary className="muted" style={{ cursor: 'pointer', fontSize: 11 }}>JSON grezzo</summary>
+                      <pre style={{ fontSize: 10, marginTop: 4, maxHeight: 180 }}>{JSON.stringify(campaignPreview, null, 2)}</pre>
+                    </details>
                   </>
                 )}
                 {campaignLaunch && (
                   <>
                     <h3>Launch result</h3>
-                    <pre style={{ fontSize: 11, maxHeight: 200 }}>{JSON.stringify(campaignLaunch, null, 2)}</pre>
+                    <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap', marginBottom: 10, fontSize: 13 }}>
+                      <span>🎯 <strong>{String((campaignLaunch as any).targetingCount ?? 0)}</strong> clienti</span>
+                      <span>📤 <strong>{((campaignLaunch as any).outboxItems as unknown[])?.length ?? 0}</strong> messaggi</span>
+                      <span>✅ <strong>{((campaignLaunch as any).tasks as unknown[])?.length ?? 0}</strong> task</span>
+                    </div>
+                    {(((campaignLaunch as any).tasks as Array<{ id: string; type: string; status: string; assigneeRole?: string }>)?.length > 0) && (
+                      <ul className="stacked" style={{ maxHeight: 140, overflowY: 'auto', marginBottom: 8 }}>
+                        {((campaignLaunch as any).tasks as Array<{ id: string; type: string; status: string; assigneeRole?: string }>).map(t => (
+                          <li key={t.id}>
+                            <span style={{ fontSize: 13 }}>{t.type}</span>
+                            <span className="muted" style={{ fontSize: 11, marginLeft: 'auto' }}>{t.assigneeRole ? `${t.assigneeRole} · ` : ''}{t.status}</span>
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                    <details>
+                      <summary className="muted" style={{ cursor: 'pointer', fontSize: 11 }}>JSON grezzo</summary>
+                      <pre style={{ fontSize: 10, marginTop: 4, maxHeight: 180 }}>{JSON.stringify(campaignLaunch, null, 2)}</pre>
+                    </details>
                   </>
                 )}
                 {!campaignPreview && !campaignLaunch && (

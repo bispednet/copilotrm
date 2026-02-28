@@ -28,6 +28,30 @@ export interface ConsentState {
   updatedAt: string;
 }
 
+export type InteractionType =
+  | 'ticket.opened'
+  | 'ticket.closed'
+  | 'chat.message'
+  | 'draft.sent'
+  | 'draft.approved'
+  | 'handoff.received'
+  | 'inbound.whatsapp'
+  | 'inbound.email'
+  | 'inbound.telegram';
+
+export interface CustomerInteraction {
+  id: string;
+  customerId: UUID;
+  type: InteractionType;
+  channel?: string;
+  agentName?: string;
+  summary: string;
+  relatedOfferId?: UUID;
+  relatedTicketId?: string;
+  relatedRunId?: string;
+  createdAt: string;
+}
+
 export interface CustomerProfile {
   id: UUID;
   fullName: string;
@@ -40,6 +64,7 @@ export interface CustomerProfile {
   purchaseHistory: string[];
   assistanceHistory: string[];
   conversationNotes: string[];
+  interactions: CustomerInteraction[];
   consents: ConsentState;
   commercialSaturationScore: number;
   /** Telegram chat_id per invio diretto (numerico come stringa, es. "123456789") */
@@ -188,6 +213,8 @@ export interface OrchestratorContext {
   activeObjectives: ManagerObjective[];
   activeOffers: ProductOffer[];
   now: string;
+  /** Callback opzionale per registrare interazioni cliente durante runSwarm */
+  onInteraction?: (interaction: Omit<CustomerInteraction, 'customerId'>) => void;
 }
 
 export interface OrchestratorOutput {
@@ -343,6 +370,9 @@ export interface ContentCard {
   avatarScript?: string;      // script per avatar video
   podcastOutline?: string;    // outline per podcast multi-agent
   mediaJobIds?: string[];     // job IDs media pipeline
+  wpDraftId?: string;         // ID post WordPress creato come draft dal worker
+  publishedAt?: string;       // ISO timestamp quando pubblicato sui canali
+  publishedTo?: string[];     // canali pubblicati es. ['telegram', 'wordpress']
   approvalStatus: 'pending' | 'approved' | 'rejected';
   approvedBy?: string;
   approvedAt?: string;

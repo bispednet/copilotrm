@@ -68,12 +68,21 @@ importers:
       '@bisp/integrations-email':
         specifier: workspace:*
         version: link:../../packages/integrations-email
+      '@bisp/integrations-energy':
+        specifier: workspace:*
+        version: link:../../packages/integrations-energy
+      '@bisp/integrations-hardware':
+        specifier: workspace:*
+        version: link:../../packages/integrations-hardware
       '@bisp/integrations-media':
         specifier: workspace:*
         version: link:../../packages/integrations-media
       '@bisp/integrations-social':
         specifier: workspace:*
         version: link:../../packages/integrations-social
+      '@bisp/integrations-telco':
+        specifier: workspace:*
+        version: link:../../packages/integrations-telco
       '@bisp/integrations-telegram':
         specifier: workspace:*
         version: link:../../packages/integrations-telegram
@@ -435,6 +444,24 @@ importers:
 
   packages/integrations-email: {}
 
+  packages/integrations-energy:
+    devDependencies:
+      '@types/node':
+        specifier: ^22.9.0
+        version: 22.19.12
+      typescript:
+        specifier: ^5.6.3
+        version: 5.9.3
+
+  packages/integrations-hardware:
+    devDependencies:
+      '@types/node':
+        specifier: ^22.9.0
+        version: 22.19.12
+      typescript:
+        specifier: ^5.6.3
+        version: 5.9.3
+
   packages/integrations-llm: {}
 
   packages/integrations-media: {}
@@ -442,6 +469,15 @@ importers:
   packages/integrations-rss: {}
 
   packages/integrations-social: {}
+
+  packages/integrations-telco:
+    devDependencies:
+      '@types/node':
+        specifier: ^22.9.0
+        version: 22.19.12
+      typescript:
+        specifier: ^5.6.3
+        version: 5.9.3
 
   packages/integrations-telegram: {}
 

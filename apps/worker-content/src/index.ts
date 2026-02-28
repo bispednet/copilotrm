@@ -266,10 +266,7 @@ async function runInvoiceContentPipeline(payload: {
     };
     cards.push(card);
 
-    // 4. Registra nell'api-core per l'approval UI (fire-and-forget)
-    void registerCardInApiCore(card);
-
-    // 5. Pubblica su WordPress come draft
+    // 4. Pubblica su WordPress come draft (prima della registrazione, così wpDraftId è disponibile)
     if (wp) {
       try {
         const titleMatch = blogDraft.match(/<h[12][^>]*>(.*?)<\/h[12]>/s);
@@ -282,11 +279,15 @@ async function runInvoiceContentPipeline(payload: {
           slug: `stock-${enrichedTitle.toLowerCase().replace(/[^a-z0-9]+/g, '-').slice(0, 50)}-${Date.now().toString(36)}`,
         });
         wpPostIds.push(result.id);
+        card.wpDraftId = result.id.toString();
         logger.info('worker-content: ContentCard WordPress draft creato', { postId: result.id, title: enrichedTitle });
       } catch (err) {
         logger.warn('worker-content: WordPress publish ContentCard fallita', { error: String(err) });
       }
     }
+
+    // 5. Registra nell'api-core per l'approval UI (ora include wpDraftId se WP configurato)
+    void registerCardInApiCore(card);
   }
 
   logger.info('worker-content: invoice pipeline completata', {

@@ -3,7 +3,7 @@ export type RbacRole = 'admin' | 'manager' | 'assist' | 'sales' | 'customer-care
 export const ROLE_PERMISSIONS: Record<RbacRole, string[]> = {
   admin: ['*'],
   manager: ['objectives:write', 'outbox:approve', 'kpi:read', 'campaigns:manage', 'settings:write'],
-  assist: ['assist:read', 'assist:write', 'customers:lookup'],
+  assist: ['assist:read', 'assist:write', 'customers:lookup', 'consult:read'],
   sales: ['consult:read', 'tasks:read', 'tasks:update'],
   'customer-care': ['inbound:read', 'tasks:read', 'tasks:update'],
   content: ['campaigns:read', 'outbox:read', 'content:write'],

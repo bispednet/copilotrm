@@ -6,7 +6,7 @@ export class ContentAgent implements BusinessAgent {
   name = 'content';
 
   supports(eventType: DomainEvent['type']): boolean {
-    return eventType === 'danea.invoice.ingested' || eventType === 'offer.promo.ingested';
+    return eventType === 'danea.invoice.ingested' || eventType === 'offer.promo.ingested' || eventType === 'manager.objective.updated';
   }
 
   execute(ctx: OrchestratorContext): AgentExecutionResult {
@@ -22,6 +22,11 @@ export class ContentAgent implements BusinessAgent {
     if (ctx.event.type === 'offer.promo.ingested') {
       const title = String(p.title ?? 'Promo');
       tasks.push({ id: id('task'), kind: 'content', title: `Pacchetto social/blog per ${title}`, assigneeRole: 'content', priority: 6, offerId: String(p.offerId ?? ''), status: 'open', createdAt: new Date().toISOString() });
+    }
+
+    if (ctx.event.type === 'manager.objective.updated') {
+      const objectiveName = String(p.name ?? 'obiettivo');
+      tasks.push({ id: id('task'), kind: 'content', title: `Rivedi piano contenuti per obiettivo: ${objectiveName}`, assigneeRole: 'content', priority: 7, status: 'open', createdAt: new Date().toISOString() });
     }
 
     return { agent: this.name, actions: [], tasks, drafts, notes: ['Content factory draft creati'] };

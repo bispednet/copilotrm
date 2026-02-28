@@ -285,6 +285,19 @@ export class CopilotRMOrchestrator {
           });
           runtime.updateHandoff(handoffId, runId, { status: 'executed' });
 
+          // Notifica callback interazione se disponibile nel contesto
+          if (ctx.onInteraction) {
+            ctx.onInteraction({
+              id: uid(),
+              type: 'handoff.received',
+              channel: edge.toAgent,
+              agentName: edge.toAgent,
+              summary: `Handoff ${edge.fromAgent}→${edge.toAgent}: ${edge.reason}`,
+              relatedRunId: runId,
+              createdAt: new Date().toISOString(),
+            });
+          }
+
           allTasks.push(...hopExec.tasks);
           allDrafts.push(...hopExec.drafts);
           allAudit.push(makeAuditRecord(edge.toAgent, 'agent.notes', { notes: hopExec.notes }));

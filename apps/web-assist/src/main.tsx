@@ -53,6 +53,28 @@ type Ticket = {
 type ChatMessage = { role: 'user' | 'assistant'; content: string };
 type Toast = { id: number; kind: 'ok' | 'err'; msg: string };
 
+// ── Hardware quote types ──────────────────────────────────────────────────────
+type HardwareSupplier = 'runner' | 'amazon' | 'nexths' | 'esprinet' | 'ingram';
+type HardwareItem = {
+  id: string; title: string; brand?: string; ean?: string;
+  price?: number; currency: string;
+  availability: 'in-stock' | 'low-stock' | 'out-of-stock' | 'unknown';
+  url?: string; imageUrl?: string; supplier: HardwareSupplier;
+};
+type SupplierResult = {
+  supplier: HardwareSupplier; priority: number; configured: boolean;
+  items: HardwareItem[]; searchUrl?: string; error?: string; durationMs?: number;
+};
+type HardwareQuoteResponse = { query: string; results: SupplierResult[]; searchedAt: string };
+
+const SUPPLIER_META: Record<HardwareSupplier, { label: string; color: string; icon: string }> = {
+  runner:   { label: 'Runner.it',  color: '#dc2626', icon: '🏃' },
+  amazon:   { label: 'Amazon',     color: '#f97316', icon: '📦' },
+  nexths:   { label: 'Nexths.it',  color: '#7c3aed', icon: '🖥️' },
+  esprinet: { label: 'Esprinet',   color: '#0284c7', icon: '📋' },
+  ingram:   { label: 'Ingram',     color: '#059669', icon: '🏭' },
+};
+
 // ── Speech recognition type shim ─────────────────────────────────────────────
 declare global {
   interface Window {
@@ -123,6 +145,11 @@ function App() {
   const [chatBusy, setChatBusy] = useState(false);
   const chatBoxRef = useRef<HTMLDivElement>(null);
 
+  // Hardware quote
+  const [quoteQuery, setQuoteQuery] = useState('');
+  const [quoteResults, setQuoteResults] = useState<HardwareQuoteResponse | null>(null);
+  const [quoteBusy, setQuoteBusy] = useState(false);
+
   // ── Theme ───────────────────────────────────────────────────────────────────
   useEffect(() => {
     localStorage.setItem('assist_theme', themeMode);
@@ -153,6 +180,23 @@ function App() {
       showToast('err', `${label}: ${err instanceof Error ? err.message : String(err)}`);
     } finally {
       setBusy(false);
+    }
+  }, [showToast]);
+
+  // ── Hardware quote ─────────────────────────────────────────────────────────
+  const searchQuote = useCallback(async (q: string) => {
+    if (!q.trim()) return;
+    setQuoteQuery(q.trim());
+    setQuoteBusy(true);
+    setQuoteResults(null);
+    try {
+      const res = await apiFetch(`/api/hardware/quote?q=${encodeURIComponent(q.trim())}&max=5`);
+      if (res.ok) setQuoteResults(await res.json() as HardwareQuoteResponse);
+      else showToast('err', `Quote: HTTP ${res.status}`);
+    } catch (e) {
+      showToast('err', `Quote: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setQuoteBusy(false);
     }
   }, [showToast]);
 
@@ -283,20 +327,49 @@ function App() {
     setChatInput('');
     setChatHistory((prev) => [...prev, { role: 'user', content: msg }]);
     setChatBusy(true);
+    // placeholder for streaming assistant reply
+    const assistantIdx = chatHistory.length + 1;
+    setChatHistory((prev) => [...prev, { role: 'assistant', content: '' }]);
     try {
       const res = await apiFetch('/api/chat', {
         method: 'POST',
         body: JSON.stringify({ message: msg, customerId: chatCustomerId || undefined }),
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const data = await res.json() as { reply: string };
-      setChatHistory((prev) => [...prev, { role: 'assistant', content: data.reply }]);
+      const reader = res.body!.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop() ?? '';
+        for (const line of lines) {
+          if (!line.startsWith('data: ')) continue;
+          try {
+            const parsed = JSON.parse(line.slice(6)) as { type: string; text?: string };
+            if (parsed.type === 'token' || parsed.type === 'agent_reply') {
+              setChatHistory((prev) => {
+                const next = [...prev];
+                const a = next[assistantIdx];
+                if (a) next[assistantIdx] = { ...a, content: a.content + (parsed.text ?? '') };
+                return next;
+              });
+            }
+          } catch { /* skip malformed SSE line */ }
+        }
+      }
     } catch (err) {
-      setChatHistory((prev) => [...prev, { role: 'assistant', content: `Errore: ${err instanceof Error ? err.message : String(err)}` }]);
+      setChatHistory((prev) => {
+        const next = [...prev];
+        if (next[assistantIdx]) next[assistantIdx] = { role: 'assistant', content: `Errore: ${err instanceof Error ? err.message : String(err)}` };
+        return next;
+      });
     } finally {
       setChatBusy(false);
     }
-  }, [chatInput, chatBusy, chatCustomerId]);
+  }, [chatInput, chatBusy, chatCustomerId, chatHistory.length]);
 
   const setLookupAndChat = (res: LookupResponse) => {
     setLookup(res);
@@ -493,6 +566,17 @@ function App() {
                             <input value={editModel} onChange={(e) => setEditModel(e.target.value)} placeholder="Galaxy S23..." />
                           </div>
                         </div>
+                        {(editBrand || editModel) && (
+                          <button
+                            type="button"
+                            className="ghost"
+                            style={{ margin: '4px 0', fontSize: 12, padding: '4px 10px' }}
+                            disabled={quoteBusy}
+                            onClick={() => void searchQuote([editBrand, editModel].filter(Boolean).join(' '))}
+                          >
+                            💰 Cerca prezzi{editBrand || editModel ? ` — ${[editBrand, editModel].filter(Boolean).join(' ')}` : ''}
+                          </button>
+                        )}
                         <label>Nr. Serie / IMEI</label>
                         <input value={editSerial} onChange={(e) => setEditSerial(e.target.value)} placeholder="Opzionale" />
                         <label>Difetto dichiarato *</label>
@@ -635,6 +719,15 @@ function App() {
                             <div style={{ display: 'flex', gap: 4 }}>
                               <button className="ghost" style={{ margin: 0, padding: '3px 6px', fontSize: 11 }} onClick={() => setSelectedTicketId(t.id)}>Sel.</button>
                               <button className="ghost" style={{ margin: 0, padding: '3px 6px', fontSize: 11 }} onClick={() => printScheda(t.id)}>🖨️</button>
+                              <button
+                                className="ghost"
+                                style={{ margin: 0, padding: '3px 6px', fontSize: 11 }}
+                                title="Cerca prezzi sui fornitori hardware"
+                                onClick={() => {
+                                  const q = [t.brand, t.model].filter(Boolean).join(' ') || t.deviceType;
+                                  void searchQuote(q);
+                                }}
+                              >💰</button>
                             </div>
                           </td>
                         </tr>
@@ -644,6 +737,92 @@ function App() {
                 </div>
               </article>
             </section>
+          )}
+
+          {/* ── HARDWARE QUOTE PANEL ──────────────────────────────── */}
+          {(quoteResults || quoteBusy) && (
+            <article className="card" style={{ marginTop: 14 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 10 }}>
+                <h2 style={{ margin: 0, flex: 1 }}>💰 Preventivi hardware{quoteResults ? ` — "${quoteResults.query}"` : ''}</h2>
+                {quoteBusy && <span className="muted" style={{ fontSize: 12 }}>⏳ ricerca in corso…</span>}
+                <button className="ghost" style={{ margin: 0, padding: '3px 8px', fontSize: 11 }} onClick={() => { setQuoteResults(null); }}>✕ Chiudi</button>
+              </div>
+
+              {/* Quick search bar */}
+              <div style={{ display: 'flex', gap: 8, marginBottom: 12 }}>
+                <input
+                  style={{ flex: 1 }}
+                  value={quoteQuery}
+                  onChange={(e) => setQuoteQuery(e.target.value)}
+                  placeholder="es. Samsung Galaxy S24, Lenovo ThinkPad L15..."
+                  onKeyDown={(e) => { if (e.key === 'Enter') void searchQuote(quoteQuery); }}
+                />
+                <button disabled={quoteBusy || !quoteQuery.trim()} onClick={() => void searchQuote(quoteQuery)} style={{ margin: 0 }}>🔍</button>
+              </div>
+
+              {quoteResults && (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                  {quoteResults.results.map((r) => {
+                    const meta = SUPPLIER_META[r.supplier];
+                    return (
+                      <div key={r.supplier} style={{ border: `1px solid var(--line)`, borderRadius: 8, overflow: 'hidden' }}>
+                        {/* Supplier header */}
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 10px', background: `${meta.color}18` }}>
+                          <span style={{ fontSize: 14 }}>{meta.icon}</span>
+                          <strong style={{ fontSize: 13, color: meta.color }}>{meta.label}</strong>
+                          <span style={{ fontSize: 10, marginLeft: 'auto', padding: '1px 6px', borderRadius: 4,
+                            background: r.configured ? '#22c55e22' : '#94a3b822',
+                            color: r.configured ? '#16a34a' : '#64748b' }}>
+                            {r.configured ? '✓ configurato' : 'non configurato'}
+                          </span>
+                          {r.durationMs && <span className="muted" style={{ fontSize: 10 }}>{r.durationMs}ms</span>}
+                        </div>
+
+                        <div style={{ padding: '8px 10px' }}>
+                          {/* Items */}
+                          {r.items.length > 0 ? (
+                            <ul style={{ margin: 0, padding: 0, listStyle: 'none', display: 'flex', flexDirection: 'column', gap: 6 }}>
+                              {r.items.map((item) => (
+                                <li key={item.id} style={{ display: 'flex', gap: 8, alignItems: 'flex-start', fontSize: 13 }}>
+                                  {item.imageUrl && <img src={item.imageUrl} alt="" style={{ width: 36, height: 36, objectFit: 'contain', borderRadius: 4, flexShrink: 0 }} />}
+                                  <div style={{ flex: 1, minWidth: 0 }}>
+                                    <div style={{ fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                                      {item.url ? <a href={item.url} target="_blank" rel="noreferrer" style={{ color: 'var(--ink)' }}>{item.title}</a> : item.title}
+                                    </div>
+                                    <div style={{ display: 'flex', gap: 8, marginTop: 2, flexWrap: 'wrap' }}>
+                                      {item.price != null && (
+                                        <span style={{ fontWeight: 700, color: '#16a34a' }}>
+                                          {item.price.toFixed(2)} {item.currency}
+                                        </span>
+                                      )}
+                                      <span style={{ fontSize: 11, padding: '1px 5px', borderRadius: 4,
+                                        background: item.availability === 'in-stock' ? '#22c55e22' : item.availability === 'out-of-stock' ? '#ef444422' : '#94a3b822',
+                                        color: item.availability === 'in-stock' ? '#16a34a' : item.availability === 'out-of-stock' ? '#dc2626' : '#64748b' }}>
+                                        {item.availability === 'in-stock' ? '● disponibile' : item.availability === 'out-of-stock' ? '● esaurito' : '○ da verificare'}
+                                      </span>
+                                      {item.brand && <span className="muted" style={{ fontSize: 11 }}>{item.brand}</span>}
+                                    </div>
+                                  </div>
+                                </li>
+                              ))}
+                            </ul>
+                          ) : (
+                            <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                              {r.searchUrl && (
+                                <a href={r.searchUrl} target="_blank" rel="noreferrer" style={{ fontSize: 12, color: meta.color }}>
+                                  🔗 Cerca manualmente su {meta.label}
+                                </a>
+                              )}
+                              {r.error && <span className="muted" style={{ fontSize: 11 }}>{r.error}</span>}
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </article>
           )}
 
           {/* ── CHAT ──────────────────────────────────────────────── */}

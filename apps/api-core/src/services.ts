@@ -14,6 +14,29 @@ export function makeId(prefix: string): string {
   return `${prefix}_${Math.random().toString(36).slice(2, 10)}`;
 }
 
+/**
+ * Valida che un draft abbia il destinatario necessario prima dell'invio.
+ * - one-to-one: recipientRef deve essere non-vuoto
+ * - one-to-many Telegram: TELEGRAM_CHANNEL_ID_APPROVE_POST deve essere configurato
+ * Restituisce null se ok, stringa di errore se bloccato.
+ */
+export function validateDraftRecipient(
+  draft: CommunicationDraft,
+  channelConfig: { telegramChannelId?: string }
+): string | null {
+  if (draft.audience === 'one-to-one') {
+    if (!draft.recipientRef?.trim()) {
+      return `Draft ${draft.id} (${draft.channel}) è one-to-one ma recipientRef è vuoto — impossibile inviare`;
+    }
+    return null;
+  }
+  // one-to-many: per Telegram verifica che ci sia un canale broadcast configurato
+  if (draft.channel === 'telegram' && !channelConfig.telegramChannelId) {
+    return `Draft ${draft.id}: broadcast Telegram non configurato (TELEGRAM_CHANNEL_ID_APPROVE_POST mancante)`;
+  }
+  return null;
+}
+
 export function buildRagStore(customers: CustomerProfile[], offers: ProductOffer[]): InMemoryRAGStore {
   const rag = new InMemoryRAGStore();
   offers.forEach((o) => {

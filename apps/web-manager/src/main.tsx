@@ -31,6 +31,9 @@ type ContentCard = {
   instagramDraft?: string;
   xDraft?: string;
   telegramDraft?: string;
+  wpDraftId?: string;
+  publishedAt?: string;
+  publishedTo?: string[];
   approvalStatus: 'pending' | 'approved' | 'rejected';
   approvedBy?: string;
   approvedAt?: string;
@@ -44,6 +47,7 @@ type Ticket = { id: string; phoneLookup: string; deviceType: string; issue: stri
 type Outbox = { id: string; status: string; draft: { channel: string; audience: string; body: string } };
 type Objective = { id: string; name: string; active: boolean; periodStart: string; periodEnd: string; preferredOfferIds: string[] };
 type AdminSetting = { key: string; category: string; type?: 'string' | 'boolean' | 'number' | 'secret' | 'string[]'; source: string; value: unknown; description?: string };
+type EnvStatus = { key: string; category: string; label: string; configured: boolean };
 type Character = {
   key: string;
   name: string;
@@ -116,12 +120,14 @@ function App() {
   const [campaignPreview, setCampaignPreview] = useState<Record<string, unknown> | null>(null);
   const [campaignLaunch, setCampaignLaunch] = useState<Record<string, unknown> | null>(null);
 
+  const [envStatus, setEnvStatus] = useState<EnvStatus[]>([]);
+
   const [objectiveName, setObjectiveName] = useState('Nuovo obiettivo commerciale');
-  const [objectiveOfferIds, setObjectiveOfferIds] = useState('');
-  const [objectiveStockIds, setObjectiveStockIds] = useState('');
+  const [selectedPreferredOffers, setSelectedPreferredOffers] = useState<string[]>([]);
+  const [selectedStockOffers, setSelectedStockOffers] = useState<string[]>([]);
   const [objectiveMinMargin, setObjectiveMinMargin] = useState('');
   const [objectiveDailyCap, setObjectiveDailyCap] = useState('');
-  const [objectiveCategoryWeights, setObjectiveCategoryWeights] = useState('{"smartphone":1.5}');
+  const [categoryWeightDraft, setCategoryWeightDraft] = useState<Record<string, number>>({ smartphone: 1, computer: 1, tablet: 1, energia: 1, telefonia: 1, assistenza: 1, accessori: 1 });
 
   const [settingDraft, setSettingDraft] = useState<Record<string, string>>({});
   const [selectedCharacterKey, setSelectedCharacterKey] = useState('');
@@ -164,7 +170,7 @@ function App() {
   }
 
   async function refreshAll(): Promise<void> {
-    const [c, o, t, tk, ob, kp, obj, st, ch, inf] = await Promise.all([
+    const [c, o, t, tk, ob, kp, obj, st, ch, inf, ev] = await Promise.all([
       apiFetch('/api/customers').then((r) => r.json()),
       apiFetch('/api/offers').then((r) => r.json()),
       apiFetch('/api/tasks').then((r) => r.json()),
@@ -175,6 +181,7 @@ function App() {
       apiFetch('/api/admin/settings').then((r) => r.json()),
       apiFetch('/api/admin/characters').then((r) => r.json()),
       apiFetch('/api/system/infra').then((r) => r.json()),
+      apiFetch('/api/admin/env-status').then((r) => r.json()).catch(() => []),
     ]);
     setCustomers(Array.isArray(c) ? c : []);
     setOffers(Array.isArray(o) ? o : []);
@@ -186,6 +193,7 @@ function App() {
     setSettings(Array.isArray(st?.items) ? st.items : []);
     setCharacters(Array.isArray(ch) ? ch : []);
     setInfra(inf ?? null);
+    setEnvStatus(Array.isArray(ev) ? ev : []);
     if (!selectedCharacterKey && Array.isArray(ch) && ch[0]?.key) {
       setSelectedCharacterKey(ch[0].key);
       setCharacterDraft(ch[0]);
@@ -296,11 +304,17 @@ function App() {
           <>
             <header className="hero card">
               <div>
-                <p className="eyebrow">Executive Summary</p>
-                <h2>KPI e stato operativo</h2>
-                <p className="lede">Questa dashboard e' il riferimento definitivo UI per guidare backend, modelli, agenti e automazioni.</p>
+                <p className="eyebrow">Pannello di controllo — {new Date().toLocaleDateString('it-IT', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' })}</p>
+                <h2>Benvenuto nel Control Plane</h2>
+                <p className="lede">Monitora KPI, swarm runs attive, task in attesa e accedi rapidamente alle funzioni principali.</p>
+              </div>
+              <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 12 }}>
+                {([['CEO Objectives', 'ceo'], ['Campagne', 'campaigns'], ['Swarm Studio', 'swarm'], ['Impostazioni', 'admin']] as [string, Page][]).map(([label, key]) => (
+                  <button key={key} className="ghost" style={{ padding: '6px 14px', fontSize: 13 }} onClick={() => setPage(key)}>{label}</button>
+                ))}
               </div>
             </header>
+
             <section className="statsGrid">
               <article className="card stat"><span>Obiettivi attivi</span><strong>{kpi?.objectivesActive ?? 0}</strong></article>
               <article className="card stat"><span>Offerte attive</span><strong>{kpi?.offersActive ?? 0}</strong></article>
@@ -310,6 +324,38 @@ function App() {
               <article className="card stat"><span>Swarm completati</span><strong>{kpi?.swarm?.completed ?? 0}</strong></article>
               <article className="card stat"><span>Avg top score</span><strong>{kpi?.swarm?.avgScore != null ? kpi.swarm.avgScore.toFixed(2) : '—'}</strong></article>
               <article className="card stat"><span>Audit records</span><strong>{kpi?.auditRecords ?? 0}</strong></article>
+            </section>
+
+            <section className="grid twoCols">
+              <article className="card">
+                <h3>Ultime run Swarm</h3>
+                {swarmRuns.length === 0 && <p className="muted" style={{ fontSize: 13 }}>Nessuna run — attiva uno scenario per avviarne una.</p>}
+                {swarmRuns.slice(0, 6).map((run) => (
+                  <div key={run.id} onClick={() => { setPage('swarm'); void loadRunDetail(run.id); }}
+                    style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 0', borderBottom: '1px solid var(--line)', cursor: 'pointer', fontSize: 13 }}>
+                    <span style={{ width: 10, height: 10, borderRadius: '50%', background: run.status === 'completed' ? '#22c55e' : run.status === 'failed' ? '#ef4444' : '#f59e0b', flexShrink: 0 }} />
+                    <span style={{ flex: 1 }}>{run.eventType}</span>
+                    <span className="muted">{run.agentsInvolved.length} agent{run.agentsInvolved.length !== 1 ? 'i' : 'e'}</span>
+                    <span className="muted">{new Date(run.startedAt).toLocaleTimeString('it-IT', { hour: '2-digit', minute: '2-digit' })}</span>
+                  </div>
+                ))}
+                {swarmRuns.length === 0 && (
+                  <button className="ghost" style={{ marginTop: 8, fontSize: 13 }} onClick={() => void refreshSwarm()}>Carica runs</button>
+                )}
+              </article>
+
+              <article className="card">
+                <h3>Task in attesa</h3>
+                {tasks.filter(t => t.status === 'pending' || t.status === 'open').length === 0
+                  ? <p className="muted" style={{ fontSize: 13 }}>Nessun task in attesa.</p>
+                  : tasks.filter(t => t.status === 'pending' || t.status === 'open').slice(0, 8).map((task) => (
+                      <div key={task.id} style={{ display: 'flex', gap: 8, padding: '5px 0', borderBottom: '1px solid var(--line)', fontSize: 13, alignItems: 'center' }}>
+                        <span style={{ flex: 1 }}>{task.title}</span>
+                        <span style={{ padding: '1px 6px', borderRadius: 4, fontSize: 11, background: 'var(--accent-2)', color: '#fff' }}>{task.assigneeRole}</span>
+                      </div>
+                    ))
+                }
+              </article>
             </section>
           </>
         )}
@@ -714,27 +760,80 @@ function App() {
           </section>
         )}
 
-        {page === 'ceo' && (
+        {page === 'ceo' && (() => {
+          const CEO_CATEGORIES = ['smartphone', 'computer', 'tablet', 'energia', 'telefonia', 'assistenza', 'accessori'];
+          const toggleOffer = (id: string, list: string[], setter: (v: string[]) => void) =>
+            setter(list.includes(id) ? list.filter(x => x !== id) : [...list, id]);
+          return (
           <section className="grid twoCols">
             <article className="card">
               <h2>CEO Objectives</h2>
+              <small className="muted" style={{ display: 'block', marginBottom: 12 }}>Definisci le priorità commerciali del mese. Gli agenti le usano per valutare e proporre azioni.</small>
+
               <label>Nome obiettivo</label>
-              <input value={objectiveName} onChange={(e) => setObjectiveName(e.target.value)} />
-              <label>Preferred offer IDs (csv)</label>
-              <input value={objectiveOfferIds} onChange={(e) => setObjectiveOfferIds(e.target.value)} placeholder="off_abc, off_xyz" />
-              <label>Stock clearance offer IDs (csv)</label>
-              <input value={objectiveStockIds} onChange={(e) => setObjectiveStockIds(e.target.value)} placeholder="off_da_smaltire" />
-              <label>Margine minimo % (es: 15)</label>
-              <input type="number" value={objectiveMinMargin} onChange={(e) => setObjectiveMinMargin(e.target.value)} placeholder="15" />
-              <label>Capacità contatti/giorno (es: 50)</label>
-              <input type="number" value={objectiveDailyCap} onChange={(e) => setObjectiveDailyCap(e.target.value)} placeholder="50" />
-              <label>Category weights (JSON)</label>
-              <input value={objectiveCategoryWeights} onChange={(e) => setObjectiveCategoryWeights(e.target.value)} placeholder='{"smartphone":1.5,"energy":2}' />
-              <button
+              <input value={objectiveName} onChange={(e) => setObjectiveName(e.target.value)} placeholder="Es: Spinta smartphone Q1" />
+
+              <label style={{ marginTop: 12 }}>Offerte da spingere (priorità di vendita)</label>
+              <small className="muted" style={{ fontSize: 11 }}>Seleziona le offerte che gli agenti devono promuovere attivamente.</small>
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 6 }}>
+                {offers.length === 0 && <span className="muted" style={{ fontSize: 12 }}>Caricamento offerte...</span>}
+                {offers.filter(o => o.active).map((o) => (
+                  <label key={o.id} style={{ display: 'flex', alignItems: 'center', gap: 4, padding: '4px 10px', border: `1px solid ${selectedPreferredOffers.includes(o.id) ? 'var(--accent)' : 'var(--line)'}`, borderRadius: 20, cursor: 'pointer', fontSize: 12,
+                    background: selectedPreferredOffers.includes(o.id) ? 'var(--accent)' : 'transparent',
+                    color: selectedPreferredOffers.includes(o.id) ? '#fff' : 'inherit' }}>
+                    <input type="checkbox" hidden checked={selectedPreferredOffers.includes(o.id)} onChange={() => toggleOffer(o.id, selectedPreferredOffers, setSelectedPreferredOffers)} />
+                    {o.title}
+                  </label>
+                ))}
+              </div>
+
+              <label style={{ marginTop: 12 }}>Offerte in smaltimento scorte</label>
+              <small className="muted" style={{ fontSize: 11 }}>Prodotti con stock da liquidare — l'agente li propone per primi.</small>
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 6 }}>
+                {offers.filter(o => o.active).map((o) => (
+                  <label key={o.id} style={{ display: 'flex', alignItems: 'center', gap: 4, padding: '4px 10px', border: `1px solid ${selectedStockOffers.includes(o.id) ? '#f59e0b' : 'var(--line)'}`, borderRadius: 20, cursor: 'pointer', fontSize: 12,
+                    background: selectedStockOffers.includes(o.id) ? '#f59e0b' : 'transparent',
+                    color: selectedStockOffers.includes(o.id) ? '#fff' : 'inherit' }}>
+                    <input type="checkbox" hidden checked={selectedStockOffers.includes(o.id)} onChange={() => toggleOffer(o.id, selectedStockOffers, setSelectedStockOffers)} />
+                    {o.title}
+                  </label>
+                ))}
+              </div>
+
+              <label style={{ marginTop: 14 }}>Peso per categoria</label>
+              <small className="muted" style={{ fontSize: 11 }}>1× = neutro · 2× = doppia priorità · 0× = ignora categoria</small>
+              <div style={{ marginTop: 8, display: 'flex', flexDirection: 'column', gap: 6 }}>
+                {CEO_CATEGORIES.map((cat) => (
+                  <div key={cat} style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                    <span style={{ minWidth: 90, fontSize: 13, textTransform: 'capitalize' }}>{cat}</span>
+                    <input type="range" min={0} max={3} step={0.1} style={{ flex: 1 }}
+                      value={categoryWeightDraft[cat] ?? 1}
+                      onChange={(e) => setCategoryWeightDraft((prev) => ({ ...prev, [cat]: Number(e.target.value) }))} />
+                    <span style={{ minWidth: 32, textAlign: 'right', fontSize: 13, fontVariantNumeric: 'tabular-nums' }}>{(categoryWeightDraft[cat] ?? 1).toFixed(1)}×</span>
+                  </div>
+                ))}
+              </div>
+
+              <div style={{ display: 'flex', gap: 16, marginTop: 14, flexWrap: 'wrap' }}>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                  <label>Margine minimo</label>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                    <input type="number" min={0} max={100} style={{ width: 72 }} value={objectiveMinMargin} onChange={(e) => setObjectiveMinMargin(e.target.value)} placeholder="15" />
+                    <span className="muted" style={{ fontSize: 12 }}>%</span>
+                  </div>
+                </div>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                  <label>Contatti max/giorno</label>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                    <input type="number" min={1} max={500} style={{ width: 72 }} value={objectiveDailyCap} onChange={(e) => setObjectiveDailyCap(e.target.value)} placeholder="50" />
+                    <span className="muted" style={{ fontSize: 12 }}>/ giorno</span>
+                  </div>
+                </div>
+              </div>
+
+              <button style={{ marginTop: 16 }}
                 onClick={() =>
                   void runAction('objective.create', async () => {
-                    let parsedWeights: Record<string, number> = {};
-                    try { parsedWeights = JSON.parse(objectiveCategoryWeights) as Record<string, number>; } catch { /* ignore invalid json */ }
                     await apiFetch('/api/manager/objectives', {
                       method: 'POST',
                       headers: { 'content-type': 'application/json' },
@@ -744,11 +843,11 @@ function App() {
                         active: true,
                         periodStart: new Date().toISOString(),
                         periodEnd: new Date(Date.now() + 1000 * 60 * 60 * 24 * 30).toISOString(),
-                        preferredOfferIds: csvToList(objectiveOfferIds),
-                        stockClearanceOfferIds: csvToList(objectiveStockIds),
+                        preferredOfferIds: selectedPreferredOffers,
+                        stockClearanceOfferIds: selectedStockOffers,
                         minMarginPct: objectiveMinMargin ? Number(objectiveMinMargin) : undefined,
                         dailyContactCapacity: objectiveDailyCap ? Number(objectiveDailyCap) : undefined,
-                        categoryWeights: parsedWeights,
+                        categoryWeights: categoryWeightDraft,
                       }),
                     });
                   })
@@ -760,58 +859,99 @@ function App() {
             </article>
             <article className="card">
               <h3>Obiettivi correnti</h3>
-              <ul>
-                {objectives.map((o) => (
-                  <li key={o.id} style={{ marginBottom: '0.5rem' }}>
-                    <strong>{o.name}</strong> · {o.active ? '🟢 active' : '⚫ inactive'}
-                    {(o as unknown as { minMarginPct?: number }).minMarginPct != null && (
-                      <span style={{ marginLeft: '0.5rem', fontSize: '0.8em', color: '#888' }}>
-                        margin≥{(o as unknown as { minMarginPct: number }).minMarginPct}%
-                      </span>
-                    )}
-                    {(o as unknown as { dailyContactCapacity?: number }).dailyContactCapacity != null && (
-                      <span style={{ marginLeft: '0.5rem', fontSize: '0.8em', color: '#888' }}>
-                        cap/day:{(o as unknown as { dailyContactCapacity: number }).dailyContactCapacity}
-                      </span>
-                    )}
-                  </li>
-                ))}
-              </ul>
+              {objectives.length === 0 && <p className="muted" style={{ fontSize: 13 }}>Nessun obiettivo attivo.</p>}
+              {objectives.map((o) => {
+                const ext = o as unknown as { minMarginPct?: number; dailyContactCapacity?: number; stockClearanceOfferIds?: string[] };
+                return (
+                  <div key={o.id} style={{ padding: '10px 0', borderBottom: '1px solid var(--line)' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                      <span style={{ width: 8, height: 8, borderRadius: '50%', background: o.active ? '#22c55e' : '#6b7280', flexShrink: 0 }} />
+                      <strong style={{ fontSize: 14 }}>{o.name}</strong>
+                    </div>
+                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 6 }}>
+                      {o.preferredOfferIds?.length > 0 && <span style={{ fontSize: 11, padding: '1px 6px', borderRadius: 4, background: 'var(--accent)', color: '#fff' }}>{o.preferredOfferIds.length} offerte preferite</span>}
+                      {ext.stockClearanceOfferIds && ext.stockClearanceOfferIds.length > 0 && <span style={{ fontSize: 11, padding: '1px 6px', borderRadius: 4, background: '#f59e0b', color: '#fff' }}>{ext.stockClearanceOfferIds.length} in smaltimento</span>}
+                      {ext.minMarginPct != null && <span style={{ fontSize: 11, padding: '1px 6px', borderRadius: 4, background: 'var(--panel)', border: '1px solid var(--line)' }}>margin ≥{ext.minMarginPct}%</span>}
+                      {ext.dailyContactCapacity != null && <span style={{ fontSize: 11, padding: '1px 6px', borderRadius: 4, background: 'var(--panel)', border: '1px solid var(--line)' }}>{ext.dailyContactCapacity} contatti/gg</span>}
+                    </div>
+                  </div>
+                );
+              })}
             </article>
           </section>
-        )}
+          );
+        })()}
 
-        {page === 'admin' && (
-          <section className="card">
-            <h2>Admin Settings</h2>
-            <div className="tableWrap">
-              <table>
-                <thead><tr><th>Key</th><th>Category</th><th>Value</th><th>Source</th><th>Save</th></tr></thead>
-                <tbody>
-                  {settings.map((s) => (
-                    <tr key={s.key}>
-                      <td title={s.description}>{s.key}</td>
-                      <td>{s.category}</td>
-                      <td>
-                        {s.type === 'boolean' ? (
-                          <select
-                            value={settingDraft[s.key] ?? String(Boolean(s.value))}
-                            onChange={(e) => setSettingDraft((prev) => ({ ...prev, [s.key]: e.target.value }))}
-                          >
-                            <option value="true">true</option>
-                            <option value="false">false</option>
-                          </select>
-                        ) : (
-                          <input
-                            value={settingDraft[s.key] ?? (Array.isArray(s.value) ? s.value.join(', ') : String(s.value ?? ''))}
-                            onChange={(e) => setSettingDraft((prev) => ({ ...prev, [s.key]: e.target.value }))}
-                          />
-                        )}
-                      </td>
-                      <td>{s.source}</td>
-                      <td>
-                        <button
-                          className="ghost"
+        {page === 'admin' && (() => {
+          const CATEGORY_LABELS: Record<string, string> = {
+            models: 'Modelli AI', channels: 'Canali di comunicazione', autoposting: 'Auto-posting social',
+            agents: 'Agenti', system: 'Sistema', llm: 'LLM', telegram: 'Telegram', email: 'Email',
+            whatsapp: 'WhatsApp', wordpress: 'WordPress', hardware: 'Hardware / Fornitori',
+            danea: 'Danea Easyfatt', social: 'Social media', company: 'Azienda',
+          };
+          const envByCategory = envStatus.reduce<Record<string, EnvStatus[]>>((acc, e) => {
+            (acc[e.category] ??= []).push(e);
+            return acc;
+          }, {});
+          const settingsByCategory = settings.reduce<Record<string, AdminSetting[]>>((acc, s) => {
+            (acc[s.category] ??= []).push(s);
+            return acc;
+          }, {});
+          return (
+          <>
+            <section className="card" style={{ marginBottom: 24 }}>
+              <h2>Stato Integrazioni</h2>
+              <p className="muted" style={{ fontSize: 13, marginBottom: 16 }}>Verifiche basate sulla presenza delle variabili d'ambiente. I valori non vengono mai esposti.</p>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(200px, 1fr))', gap: 12 }}>
+                {Object.entries(envByCategory).map(([cat, items]) => (
+                  <article key={cat} className="card" style={{ padding: '12px 14px' }}>
+                    <h4 style={{ margin: '0 0 8px', fontSize: 12, textTransform: 'uppercase', letterSpacing: '0.06em', color: 'var(--muted)' }}>{CATEGORY_LABELS[cat] ?? cat}</h4>
+                    {items.map((e) => (
+                      <div key={e.key} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '3px 0', borderBottom: '1px solid var(--line)', fontSize: 12 }}>
+                        <span title={e.key}>{e.label}</span>
+                        <span style={{ fontWeight: 700, color: e.configured ? '#22c55e' : '#ef4444', fontSize: 14 }}>{e.configured ? '✓' : '✗'}</span>
+                      </div>
+                    ))}
+                  </article>
+                ))}
+              </div>
+            </section>
+
+            <section className="card">
+              <h2>Impostazioni Runtime</h2>
+              <p className="muted" style={{ fontSize: 13, marginBottom: 16 }}>Parametri modificabili a runtime senza riavviare il server. Persistiti su disco.</p>
+              {Object.entries(settingsByCategory).map(([cat, items]) => (
+                <details key={cat} open style={{ marginBottom: 12 }}>
+                  <summary style={{ cursor: 'pointer', fontWeight: 600, padding: '6px 0', borderBottom: '1px solid var(--line)', marginBottom: 8 }}>
+                    {CATEGORY_LABELS[cat] ?? cat} <span className="muted" style={{ fontWeight: 400, fontSize: 12 }}>({items.length})</span>
+                  </summary>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 10, paddingLeft: 4 }}>
+                    {items.map((s) => (
+                      <div key={s.key} style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                        <div style={{ flex: '0 0 260px' }}>
+                          <div style={{ fontSize: 12, fontWeight: 500 }}>{s.key}</div>
+                          {s.description && <div className="muted" style={{ fontSize: 11 }}>{s.description}</div>}
+                        </div>
+                        <div style={{ flex: 1, minWidth: 120 }}>
+                          {s.type === 'boolean' ? (
+                            <select style={{ width: '100%' }}
+                              value={settingDraft[s.key] ?? String(Boolean(s.value))}
+                              onChange={(e) => setSettingDraft((prev) => ({ ...prev, [s.key]: e.target.value }))}>
+                              <option value="true">true</option>
+                              <option value="false">false</option>
+                            </select>
+                          ) : s.type === 'secret' ? (
+                            <input type="password" style={{ width: '100%' }} placeholder="••••••"
+                              value={settingDraft[s.key] ?? ''}
+                              onChange={(e) => setSettingDraft((prev) => ({ ...prev, [s.key]: e.target.value }))} />
+                          ) : (
+                            <input style={{ width: '100%' }}
+                              value={settingDraft[s.key] ?? (Array.isArray(s.value) ? (s.value as string[]).join(', ') : String(s.value ?? ''))}
+                              onChange={(e) => setSettingDraft((prev) => ({ ...prev, [s.key]: e.target.value }))} />
+                          )}
+                        </div>
+                        <span className="muted" style={{ fontSize: 11, minWidth: 36 }}>{s.source}</span>
+                        <button className="ghost" style={{ padding: '4px 10px', fontSize: 12 }}
                           onClick={() =>
                             void runAction(`setting.${s.key}`, async () => {
                               let value: unknown = settingDraft[s.key] ?? s.value;
@@ -825,18 +965,16 @@ function App() {
                               });
                             })
                           }
-                          disabled={busy}
-                        >
-                          Save
-                        </button>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          </section>
-        )}
+                          disabled={busy}>Salva</button>
+                      </div>
+                    ))}
+                  </div>
+                </details>
+              ))}
+            </section>
+          </>
+          );
+        })()}
 
         {page === 'characters' && (
           <section className="grid twoCols">
@@ -938,10 +1076,23 @@ function App() {
                   const statusColor = c.approvalStatus === 'approved' ? '#22c55e' : c.approvalStatus === 'rejected' ? '#ef4444' : '#f59e0b';
                   return (
                     <div key={c.id} className="card" style={{ borderLeft: `4px solid ${statusColor}`, cursor: 'pointer' }} onClick={() => setSelectedCardId(isSelected ? null : c.id)}>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
                         <span style={{ background: statusColor, color: '#fff', borderRadius: 6, padding: '2px 8px', fontSize: 11, fontWeight: 700 }}>{c.approvalStatus}</span>
                         <strong>{c.title}</strong>
-                        <span className="muted" style={{ marginLeft: 'auto', fontSize: 11 }}>{c.source} · {c.createdAt.slice(0, 10)}</span>
+                        {c.publishedTo && c.publishedTo.length > 0 && (
+                          <span style={{ display: 'inline-flex', gap: 4 }}>
+                            {c.publishedTo.includes('telegram') && (
+                              <span style={{ background: '#229ED9', color: '#fff', borderRadius: 4, padding: '1px 6px', fontSize: 11 }}>Telegram ✓</span>
+                            )}
+                            {c.publishedTo.includes('wordpress') && (
+                              <span style={{ background: '#21759B', color: '#fff', borderRadius: 4, padding: '1px 6px', fontSize: 11 }}>WP ✓</span>
+                            )}
+                          </span>
+                        )}
+                        <span className="muted" style={{ marginLeft: 'auto', fontSize: 11 }}>
+                          {c.source} · {c.createdAt.slice(0, 10)}
+                          {c.publishedAt && ` · Pub: ${new Date(c.publishedAt).toLocaleString('it-IT', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })}`}
+                        </span>
                       </div>
                       <p style={{ marginTop: 6, marginBottom: 0 }}>{c.hook}</p>
 
