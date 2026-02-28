@@ -1,5 +1,77 @@
 import type { CommunicationDraft, ContentCard, TaskItem } from '@bisp/shared-types';
 
+// ─── Conversation persistence ─────────────────────────────────────────────────
+
+export interface ConversationMessage {
+  id: string;
+  sessionId: string;
+  role: 'user' | 'assistant';
+  content: string;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  swarmThread?: any[];
+  swarmRunId?: string;
+  createdAt: string;
+}
+
+export interface ConversationSession {
+  id: string;
+  customerId?: string;
+  customerName?: string;
+  title: string;
+  startedAt: string;
+  lastMessageAt: string;
+  messageCount: number;
+}
+
+export class ConversationRepository {
+  private sessions = new Map<string, ConversationSession>();
+  private messages = new Map<string, ConversationMessage[]>();
+
+  createSession(id: string, opts?: { customerId?: string; customerName?: string; firstMessage?: string }): ConversationSession {
+    const session: ConversationSession = {
+      id,
+      customerId: opts?.customerId,
+      customerName: opts?.customerName,
+      title: (opts?.firstMessage ?? 'Nuova conversazione').slice(0, 80),
+      startedAt: new Date().toISOString(),
+      lastMessageAt: new Date().toISOString(),
+      messageCount: 0,
+    };
+    this.sessions.set(id, session);
+    this.messages.set(id, []);
+    return session;
+  }
+
+  getOrCreate(sessionId: string, opts?: { customerId?: string; customerName?: string; firstMessage?: string }): ConversationSession {
+    return this.sessions.get(sessionId) ?? this.createSession(sessionId, opts);
+  }
+
+  addMessage(msg: ConversationMessage): void {
+    const list = this.messages.get(msg.sessionId) ?? [];
+    list.push(msg);
+    this.messages.set(msg.sessionId, list);
+    const s = this.sessions.get(msg.sessionId);
+    if (s) {
+      s.messageCount = list.length;
+      s.lastMessageAt = msg.createdAt;
+    }
+  }
+
+  getSession(id: string): ConversationSession | undefined {
+    return this.sessions.get(id);
+  }
+
+  listSessions(customerId?: string): ConversationSession[] {
+    return [...this.sessions.values()]
+      .filter((s) => !customerId || s.customerId === customerId)
+      .sort((a, b) => b.lastMessageAt.localeCompare(a.lastMessageAt));
+  }
+
+  listMessages(sessionId: string): ConversationMessage[] {
+    return this.messages.get(sessionId) ?? [];
+  }
+}
+
 export interface OutboxItem {
   id: string;
   draft: CommunicationDraft;

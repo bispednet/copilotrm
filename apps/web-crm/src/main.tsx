@@ -35,6 +35,7 @@ const AGENT_COLORS: Record<string, { bg: string; border: string; icon: string }>
   Commerciale:   { bg: '#78350f22', border: '#f59e0b', icon: '💼' },
   Hardware:      { bg: '#4c1d9522', border: '#8b5cf6', icon: '🖥️' },
   Telefonia:     { bg: '#1e3a5f22', border: '#6366f1', icon: '📡' },
+  Energia:       { bg: '#713f1222', border: '#f97316', icon: '⚡' },
   CustomerCare:  { bg: '#831843'  + '22', border: '#ec4899', icon: '🤝' },
   Critico:       { bg: '#7f1d1d22', border: '#ef4444', icon: '⚡' },
   Moderatore:    { bg: '#14532d22', border: '#22c55e', icon: '🔍' },
@@ -88,6 +89,11 @@ function App() {
   const [chatCustomerId, setChatCustomerId] = useState('');
   const [chatBusy, setChatBusy] = useState(false);
   const [expandedThreads, setExpandedThreads] = useState<Set<number>>(new Set());
+  const [chatSessionId, setChatSessionId] = useState<string | null>(null);
+  // SSE streaming state
+  const [streamingThread, setStreamingThread] = useState<SwarmThreadMsg[]>([]);
+  const [typingAgent, setTypingAgent] = useState<{ agent: string; agentRole: string } | null>(null);
+  const streamingThreadRef = useRef<SwarmThreadMsg[]>([]);
   const chatBoxRef = useRef<HTMLDivElement>(null);
 
   // ── Theme ───────────────────────────────────────────────────────────────────
@@ -150,46 +156,98 @@ function App() {
     if (chatBoxRef.current) {
       chatBoxRef.current.scrollTop = chatBoxRef.current.scrollHeight;
     }
-  }, [chatHistory, chatBusy]);
+  }, [chatHistory, streamingThread, typingAgent]);
 
+  // ── SSE streaming sendChat ───────────────────────────────────────────────────
   const sendChat = useCallback(async () => {
     const msg = chatInput.trim();
     if (!msg || chatBusy) return;
     setChatInput('');
-    const userMsgIndex = chatHistory.length;
+
+    // Indice dove andrà l'assistant message (dopo il user message)
+    const assistantIdx = chatHistory.length + 1;
+
     setChatHistory((prev) => [...prev, { role: 'user', content: msg }]);
     setChatBusy(true);
+    streamingThreadRef.current = [];
+    setStreamingThread([]);
+    setTypingAgent(null);
+
+    const clearStreaming = () => {
+      setTypingAgent(null);
+      streamingThreadRef.current = [];
+      setStreamingThread([]);
+    };
+
     try {
       const res = await apiFetch('/api/chat', {
         method: 'POST',
-        body: JSON.stringify({ message: msg, customerId: chatCustomerId || undefined }),
+        headers: { Accept: 'text/event-stream' },
+        body: JSON.stringify({ message: msg, customerId: chatCustomerId || undefined, sessionId: chatSessionId || undefined }),
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const data = await res.json() as {
-        reply: string;
-        swarmThread?: SwarmThreadMsg[];
-        swarmRunId?: string | null;
-        provider?: string;
-        customer?: { id: string; fullName: string; segments: string[] } | null;
-      };
-      const assistantIndex = userMsgIndex + 1;
-      setChatHistory((prev) => [...prev, {
-        role: 'assistant',
-        content: data.reply,
-        swarmThread: data.swarmThread ?? [],
-        swarmRunId: data.swarmRunId ?? null,
-        customerFound: data.customer ?? null,
-      }]);
-      // Auto-espandi il thread dell'ultima risposta
-      if (data.swarmThread?.length) {
-        setExpandedThreads((prev) => new Set([...prev, assistantIndex]));
+      if (!res.body) throw new Error('No response body');
+
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const chunks = buffer.split('\n\n');
+        buffer = chunks.pop() ?? '';
+
+        for (const chunk of chunks) {
+          const dataLine = chunk.split('\n').find((l) => l.startsWith('data: '));
+          if (!dataLine) continue;
+          let event: Record<string, unknown>;
+          try { event = JSON.parse(dataLine.slice(6)) as Record<string, unknown>; } catch { continue; }
+
+          if (event.type === 'typing') {
+            setTypingAgent({ agent: String(event.agent), agentRole: String(event.agentRole) });
+
+          } else if (event.type === 'message') {
+            setTypingAgent(null);
+            const m = event.msg as SwarmThreadMsg;
+            streamingThreadRef.current = [...streamingThreadRef.current, m];
+            setStreamingThread([...streamingThreadRef.current]);
+
+          } else if (event.type === 'done') {
+            const finalThread = [...streamingThreadRef.current];
+            const sess = String(event.sessionId ?? '');
+            if (sess && !chatSessionId) setChatSessionId(sess);
+
+            clearStreaming();
+            setChatHistory((prev) => {
+              const next = [...prev, {
+                role: 'assistant' as const,
+                content: String(event.synthesis ?? ''),
+                swarmThread: finalThread,
+                swarmRunId: (event.swarmRunId as string | null) ?? null,
+                customerFound: (event.customer as { id: string; fullName: string; segments: string[] } | null) ?? null,
+              }];
+              return next;
+            });
+            // Auto-espandi il thread dell'assistant appena aggiunto
+            if (finalThread.length > 0) {
+              setExpandedThreads((prev) => new Set([...prev, assistantIdx]));
+            }
+
+          } else if (event.type === 'error') {
+            throw new Error(String(event.message));
+          }
+        }
       }
     } catch (err) {
+      clearStreaming();
       setChatHistory((prev) => [...prev, { role: 'assistant', content: `Errore: ${err instanceof Error ? err.message : String(err)}` }]);
     } finally {
+      clearStreaming();
       setChatBusy(false);
     }
-  }, [chatInput, chatBusy, chatCustomerId, chatHistory.length]);
+  }, [chatInput, chatBusy, chatCustomerId, chatHistory.length, chatSessionId]);
 
   // ── Nav ──────────────────────────────────────────────────────────────────────
   const navItems: Array<{ key: Page; label: string; icon: string }> = [
@@ -507,7 +565,7 @@ function App() {
                     <div style={{ fontSize: 32, marginBottom: 8 }}>🤖</div>
                     <p style={{ fontWeight: 600 }}>Team CopilotRM pronto.</p>
                     <p>Ogni tua domanda viene analizzata da un team di agenti specialistici:<br />
-                      <span style={{ color: '#3b82f6' }}>Orchestratore</span> · <span style={{ color: '#10b981' }}>Assistenza</span> · <span style={{ color: '#f59e0b' }}>Commerciale</span> · <span style={{ color: '#8b5cf6' }}>Hardware</span> · <span style={{ color: '#ef4444' }}>Critico</span> · <span style={{ color: '#22c55e' }}>Moderatore</span>
+                      <span style={{ color: '#3b82f6' }}>Orchestratore</span> · <span style={{ color: '#10b981' }}>Assistenza</span> · <span style={{ color: '#f59e0b' }}>Commerciale</span> · <span style={{ color: '#8b5cf6' }}>Hardware</span> · <span style={{ color: '#6366f1' }}>Telefonia</span> · <span style={{ color: '#f97316' }}>Energia</span> · <span style={{ color: '#ec4899' }}>CustomerCare</span> · <span style={{ color: '#ef4444' }}>Critico</span> · <span style={{ color: '#22c55e' }}>Moderatore</span>
                     </p>
                   </div>
                 )}
@@ -610,12 +668,62 @@ function App() {
                   );
                 })}
 
-                {chatBusy && (
-                  <div style={{ padding: '12px 0' }}>
-                    <div style={{ fontSize: 12, color: 'var(--muted)', marginBottom: 6 }}>
-                      🎯 Orchestratore sta analizzando la richiesta…
-                    </div>
-                    <div className="chatBubble assistant typing">Il team è in discussione…</div>
+                {/* Live streaming thread: appare durante chatBusy, scompare dopo done */}
+                {chatBusy && (streamingThread.length > 0 || typingAgent) && (
+                  <div style={{
+                    border: '1px solid var(--border)',
+                    borderRadius: 10,
+                    padding: '12px 14px',
+                    marginBottom: 8,
+                    background: 'var(--surface-alt)',
+                    display: 'flex',
+                    flexDirection: 'column',
+                    gap: 10,
+                  }}>
+                    {streamingThread.map((tm, ti) => {
+                      const col = AGENT_COLORS[tm.agent] ?? DEFAULT_COLOR;
+                      const contentWithMentions = tm.content.replace(
+                        /@([A-Za-zÀ-ù]+)/g,
+                        '<span style="color:#f59e0b;font-weight:700">@$1</span>'
+                      );
+                      return (
+                        <div key={ti} style={{ background: col.bg, border: `1.5px solid ${col.border}`, borderRadius: 8, padding: '8px 12px' }}>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
+                            <span style={{ fontSize: 16 }}>{col.icon}</span>
+                            <span style={{ fontWeight: 700, fontSize: 13, color: col.border }}>{tm.agent}</span>
+                            <span style={{ fontSize: 11, color: 'var(--muted)' }}>{tm.agentRole}</span>
+                            <span style={{ marginLeft: 'auto', fontSize: 10, background: col.border + '33', color: col.border, borderRadius: 4, padding: '1px 6px', fontWeight: 600 }}>
+                              {KIND_LABEL[tm.kind]}
+                            </span>
+                          </div>
+                          {/* eslint-disable-next-line react/no-danger */}
+                          <div style={{ fontSize: 13, lineHeight: 1.5 }} dangerouslySetInnerHTML={{ __html: contentWithMentions }} />
+                          {tm.mentions.length > 0 && (
+                            <div style={{ marginTop: 4, fontSize: 11, color: 'var(--muted)' }}>
+                              → {tm.mentions.map((mn) => `@${mn}`).join(' ')}
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+
+                    {/* Typing indicator: mostra l'agente corrente */}
+                    {typingAgent && (() => {
+                      const col = AGENT_COLORS[typingAgent.agent] ?? DEFAULT_COLOR;
+                      return (
+                        <div style={{ background: col.bg, border: `1.5px dashed ${col.border}`, borderRadius: 8, padding: '8px 12px', display: 'flex', alignItems: 'center', gap: 8, opacity: 0.85 }}>
+                          <span style={{ fontSize: 16 }}>{col.icon}</span>
+                          <span style={{ fontWeight: 700, fontSize: 13, color: col.border }}>{typingAgent.agent}</span>
+                          <span style={{ fontSize: 11, color: 'var(--muted)' }}>{typingAgent.agentRole}</span>
+                          <span style={{ marginLeft: 'auto', fontSize: 11, color: 'var(--muted)', fontStyle: 'italic' }}>sta scrivendo…</span>
+                          <span style={{ display: 'inline-flex', gap: 3 }}>
+                            {[0, 1, 2].map((d) => (
+                              <span key={d} style={{ width: 5, height: 5, borderRadius: '50%', background: col.border, animation: `pulse 1.2s ${d * 0.2}s infinite` }} />
+                            ))}
+                          </span>
+                        </div>
+                      );
+                    })()}
                   </div>
                 )}
               </div>
@@ -634,13 +742,18 @@ function App() {
               </div>
 
               {chatHistory.length > 0 && (
-                <div style={{ display: 'flex', gap: 8, marginTop: 6, alignItems: 'center' }}>
+                <div style={{ display: 'flex', gap: 8, marginTop: 6, alignItems: 'center', flexWrap: 'wrap' }}>
+                  {chatSessionId && (
+                    <code style={{ fontSize: 10, color: 'var(--muted)', padding: '2px 6px', background: 'var(--surface-alt)', borderRadius: 4 }}>
+                      sessione: {chatSessionId.slice(-8)}
+                    </code>
+                  )}
                   <button
                     className="ghost"
                     style={{ fontSize: 12, padding: '4px 10px' }}
-                    onClick={() => { setChatHistory([]); setExpandedThreads(new Set()); }}
+                    onClick={() => { setChatHistory([]); setExpandedThreads(new Set()); setChatSessionId(null); }}
                   >
-                    Svuota chat
+                    Nuova sessione
                   </button>
                   <button
                     className="ghost"
