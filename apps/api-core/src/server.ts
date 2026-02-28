@@ -877,12 +877,6 @@ export function buildServer(state = buildState()) {
     persistOperationalOutput(state, output);
     return reply.code(201).send({ event, output });
   });
-  app.get('/api/swarm/runs', async () => {
-    const records = state.audit.list().filter((r) =>
-      ['event.received', 'actions.ranked', 'handoffs.derived', 'agents.executed'].includes(r.type)
-    );
-    return records.slice(-200).reverse();
-  });
   app.get('/api/system/db/snapshot', async (req, reply) => {
     if (ensurePermission(req, reply, 'settings:write') === null) return;
     const counts = await state.postgresMirror.snapshotCounts();
