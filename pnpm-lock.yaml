@@ -244,18 +244,39 @@ importers:
 
   apps/worker-content:
     dependencies:
+      '@bisp/agent-bus':
+        specifier: workspace:*
+        version: link:../../packages/agent-bus
+      '@bisp/integrations-ean':
+        specifier: workspace:*
+        version: link:../../packages/integrations-ean
       '@bisp/integrations-eliza':
         specifier: workspace:*
         version: link:../../packages/integrations-eliza
+      '@bisp/integrations-llm':
+        specifier: workspace:*
+        version: link:../../packages/integrations-llm
       '@bisp/integrations-media':
         specifier: workspace:*
         version: link:../../packages/integrations-media
+      '@bisp/integrations-rss':
+        specifier: workspace:*
+        version: link:../../packages/integrations-rss
+      '@bisp/integrations-wordpress':
+        specifier: workspace:*
+        version: link:../../packages/integrations-wordpress
+      '@bisp/shared-config':
+        specifier: workspace:*
+        version: link:../../packages/shared-config
       '@bisp/shared-db':
         specifier: workspace:*
         version: link:../../packages/shared-db
       '@bisp/shared-logger':
         specifier: workspace:*
         version: link:../../packages/shared-logger
+      '@bisp/shared-types':
+        specifier: workspace:*
+        version: link:../../packages/shared-types
       bullmq:
         specifier: ^5.16.0
         version: 5.70.1
@@ -278,6 +299,12 @@ importers:
       '@bisp/integrations-danea':
         specifier: workspace:*
         version: link:../../packages/integrations-danea
+      '@bisp/integrations-ean':
+        specifier: workspace:*
+        version: link:../../packages/integrations-ean
+      '@bisp/integrations-rss':
+        specifier: workspace:*
+        version: link:../../packages/integrations-rss
       '@bisp/shared-logger':
         specifier: workspace:*
         version: link:../../packages/shared-logger
@@ -394,6 +421,15 @@ importers:
         version: 5.9.3
 
   packages/integrations-danea: {}
+
+  packages/integrations-ean:
+    devDependencies:
+      '@types/node':
+        specifier: ^22.9.0
+        version: 22.19.12
+      typescript:
+        specifier: ^5.6.3
+        version: 5.9.3
 
   packages/integrations-eliza: {}
 

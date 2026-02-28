@@ -1,4 +1,4 @@
-import type { CommunicationDraft, TaskItem } from '@bisp/shared-types';
+import type { CommunicationDraft, ContentCard, TaskItem } from '@bisp/shared-types';
 
 export interface OutboxItem {
   id: string;
@@ -115,6 +115,36 @@ export class OutboxStore {
   replaceAll(items: OutboxItem[]): void {
     this.items.clear();
     items.forEach((i) => this.items.set(i.id, i));
+  }
+}
+
+export class ContentCardRepository {
+  private cards = new Map<string, ContentCard>();
+
+  add(card: ContentCard): ContentCard {
+    this.cards.set(card.id, card);
+    return card;
+  }
+
+  list(filters?: { approvalStatus?: ContentCard['approvalStatus'] }): ContentCard[] {
+    return [...this.cards.values()]
+      .filter((c) => {
+        if (filters?.approvalStatus && c.approvalStatus !== filters.approvalStatus) return false;
+        return true;
+      })
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  }
+
+  getById(id: string): ContentCard | undefined {
+    return this.cards.get(id);
+  }
+
+  update(id: string, patch: Partial<ContentCard>): ContentCard | undefined {
+    const curr = this.cards.get(id);
+    if (!curr) return undefined;
+    const next = { ...curr, ...patch };
+    this.cards.set(id, next);
+    return next;
   }
 }
 

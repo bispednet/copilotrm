@@ -12,12 +12,30 @@ type Page =
   | 'crm'
   | 'campaigns'
   | 'swarm'
+  | 'content'
   | 'outbox'
   | 'ceo'
   | 'admin'
   | 'characters'
   | 'infra'
   | 'ingest';
+
+type ContentCard = {
+  id: string;
+  source: 'invoice' | 'promo' | 'rss' | 'manual';
+  sourceRef: string;
+  title: string;
+  hook: string;
+  blogDraft?: string;
+  facebookDraft?: string;
+  instagramDraft?: string;
+  xDraft?: string;
+  telegramDraft?: string;
+  approvalStatus: 'pending' | 'approved' | 'rejected';
+  approvedBy?: string;
+  approvedAt?: string;
+  createdAt: string;
+};
 
 type Customer = { id: string; fullName: string; phone?: string; segments: string[]; interests?: string[] };
 type Offer = { id: string; title: string; category: string; targetSegments: string[]; active: boolean };
@@ -122,6 +140,10 @@ function App() {
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
   const [swarmDetail, setSwarmDetail] = useState<SwarmDetail | null>(null);
 
+  const [contentCards, setContentCards] = useState<ContentCard[]>([]);
+  const [selectedCardId, setSelectedCardId] = useState<string | null>(null);
+  const [contentCardFilter, setContentCardFilter] = useState<'all' | 'pending' | 'approved' | 'rejected'>('all');
+
   useEffect(() => {
     localStorage.setItem('copilotrm_manager_theme', themeMode);
     const mq = window.matchMedia('(prefers-color-scheme: dark)');
@@ -205,6 +227,18 @@ function App() {
     setSelectedRunId(runId);
   }
 
+  async function refreshContentCards(filter?: 'pending' | 'approved' | 'rejected'): Promise<void> {
+    const qs = filter ? `?status=${filter}` : '';
+    const cards = await apiFetch(`/api/content/cards${qs}`).then((r) => r.json());
+    setContentCards(Array.isArray(cards) ? cards : []);
+  }
+
+  async function approveCard(cardId: string, action: 'approve' | 'reject'): Promise<void> {
+    await apiFetch(`/api/content/cards/${cardId}/${action}`, { method: 'PATCH' });
+    await refreshContentCards(contentCardFilter === 'all' ? undefined : contentCardFilter);
+    if (selectedCardId === cardId) setSelectedCardId(null);
+  }
+
   const nav: Array<{ key: Page; label: string }> = [
     { key: 'home', label: 'Home / KPI' },
     { key: 'datahub', label: 'Data Hub 360' },
@@ -212,6 +246,7 @@ function App() {
     { key: 'crm', label: 'CRM Consult' },
     { key: 'campaigns', label: 'Campaigns' },
     { key: 'swarm', label: 'Swarm Studio' },
+    { key: 'content', label: 'Content Cards' },
     { key: 'ingest', label: 'Ingest / Stock' },
     { key: 'outbox', label: 'Outbox / Approvals' },
     { key: 'ceo', label: 'CEO Objectives' },
@@ -867,6 +902,107 @@ function App() {
             <article className="card">
               <h3>Character preview</h3>
               <pre>{JSON.stringify(characterPreview ?? {}, null, 2)}</pre>
+            </article>
+          </section>
+        )}
+
+        {page === 'content' && (
+          <section className="grid twoCols">
+            <article className="card" style={{ gridColumn: '1 / -1' }}>
+              <h2>Content Cards</h2>
+              <p className="lede">Schede contenuto generate dalla pipeline fattura/RSS. Approva o rifiuta ogni card prima della pubblicazione.</p>
+              <div className="btnRow" style={{ marginBottom: 12 }}>
+                {(['all', 'pending', 'approved', 'rejected'] as const).map((f) => (
+                  <button
+                    key={f}
+                    className={contentCardFilter === f ? '' : 'ghost'}
+                    onClick={() => {
+                      setContentCardFilter(f);
+                      void runAction(`cards.load.${f}`, () => refreshContentCards(f === 'all' ? undefined : f));
+                    }}
+                    disabled={busy}
+                  >
+                    {f}
+                  </button>
+                ))}
+                <button className="ghost" style={{ marginLeft: 'auto' }} onClick={() => void runAction('cards.refresh', () => refreshContentCards(contentCardFilter === 'all' ? undefined : contentCardFilter))} disabled={busy}>Aggiorna</button>
+              </div>
+
+              {contentCards.length === 0 && (
+                <p className="muted">Nessuna content card. Importa una fattura Danea (Ingest / Stock) o attendi il worker RSS.</p>
+              )}
+
+              <div style={{ display: 'grid', gap: 12 }}>
+                {contentCards.map((c) => {
+                  const isSelected = selectedCardId === c.id;
+                  const statusColor = c.approvalStatus === 'approved' ? '#22c55e' : c.approvalStatus === 'rejected' ? '#ef4444' : '#f59e0b';
+                  return (
+                    <div key={c.id} className="card" style={{ borderLeft: `4px solid ${statusColor}`, cursor: 'pointer' }} onClick={() => setSelectedCardId(isSelected ? null : c.id)}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                        <span style={{ background: statusColor, color: '#fff', borderRadius: 6, padding: '2px 8px', fontSize: 11, fontWeight: 700 }}>{c.approvalStatus}</span>
+                        <strong>{c.title}</strong>
+                        <span className="muted" style={{ marginLeft: 'auto', fontSize: 11 }}>{c.source} · {c.createdAt.slice(0, 10)}</span>
+                      </div>
+                      <p style={{ marginTop: 6, marginBottom: 0 }}>{c.hook}</p>
+
+                      {isSelected && (
+                        <div style={{ marginTop: 12, borderTop: '1px solid var(--border)', paddingTop: 12 }}>
+                          {c.telegramDraft && (
+                            <div style={{ marginBottom: 8 }}>
+                              <strong>Telegram</strong>
+                              <pre style={{ whiteSpace: 'pre-wrap', fontSize: 12, background: 'var(--surface-alt)', padding: 8, borderRadius: 6 }}>{c.telegramDraft}</pre>
+                            </div>
+                          )}
+                          {c.facebookDraft && (
+                            <div style={{ marginBottom: 8 }}>
+                              <strong>Facebook</strong>
+                              <pre style={{ whiteSpace: 'pre-wrap', fontSize: 12, background: 'var(--surface-alt)', padding: 8, borderRadius: 6 }}>{c.facebookDraft}</pre>
+                            </div>
+                          )}
+                          {c.instagramDraft && (
+                            <div style={{ marginBottom: 8 }}>
+                              <strong>Instagram</strong>
+                              <pre style={{ whiteSpace: 'pre-wrap', fontSize: 12, background: 'var(--surface-alt)', padding: 8, borderRadius: 6 }}>{c.instagramDraft}</pre>
+                            </div>
+                          )}
+                          {c.blogDraft && (
+                            <div style={{ marginBottom: 8 }}>
+                              <strong>Blog draft (HTML)</strong>
+                              {/* eslint-disable-next-line react/no-danger */}
+                              <div style={{ fontSize: 13, background: 'var(--surface-alt)', padding: 10, borderRadius: 6, maxHeight: 220, overflow: 'auto' }} dangerouslySetInnerHTML={{ __html: c.blogDraft }} />
+                            </div>
+                          )}
+                          {c.approvalStatus === 'pending' && (
+                            <div className="btnRow" style={{ marginTop: 10 }}>
+                              <button onClick={(e) => { e.stopPropagation(); void runAction(`card.approve.${c.id}`, () => approveCard(c.id, 'approve')); }} disabled={busy}>Approva</button>
+                              <button className="ghost" style={{ color: '#ef4444' }} onClick={(e) => { e.stopPropagation(); void runAction(`card.reject.${c.id}`, () => approveCard(c.id, 'reject')); }} disabled={busy}>Rifiuta</button>
+                            </div>
+                          )}
+                          {c.approvalStatus !== 'pending' && (
+                            <p className="muted" style={{ fontSize: 12 }}>{c.approvalStatus === 'approved' ? 'Approvata' : 'Rifiutata'} da {c.approvedBy ?? '?'} il {c.approvedAt?.slice(0, 10)}</p>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            </article>
+
+            <article className="card">
+              <h2>WordPress Plugin</h2>
+              <p>Scarica il plugin WordPress CopilotRM. Una volta installato e attivato, registra automaticamente il sito e abilita la pubblicazione di articoli dall&apos;agente redattore.</p>
+              <p className="muted" style={{ fontSize: 12 }}>Il plugin chiama <code>/api/integrations/wordpress/register</code> all&apos;attivazione e crea un endpoint REST sicuro <code>/wp-json/copilotrm/v1/articles</code>.</p>
+              <div className="btnRow">
+                <a
+                  href={`${API}/api/download/wordpress-plugin`}
+                  download="copilotrm-wp-plugin.zip"
+                  className="button"
+                  style={{ display: 'inline-block', padding: '8px 16px', background: 'var(--accent)', color: '#fff', borderRadius: 6, textDecoration: 'none', fontWeight: 600 }}
+                >
+                  Scarica Plugin WordPress (.zip)
+                </a>
+              </div>
             </article>
           </section>
         )}

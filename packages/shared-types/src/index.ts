@@ -10,7 +10,8 @@ export type EventType =
   | 'inbound.whatsapp.received'
   | 'danea.invoice.ingested'
   | 'offer.promo.ingested'
-  | 'manager.objective.updated';
+  | 'manager.objective.updated'
+  | 'chat.message';
 
 export interface AuditRecord {
   id: UUID;

@@ -24,11 +24,13 @@ import { TelegramChannelAdapter } from '@bisp/integrations-telegram';
 import { WhatsAppChannelAdapter } from '@bisp/integrations-whatsapp';
 import { CopilotRMOrchestrator } from '@bisp/orchestrator-core';
 import { SwarmRuntime } from '@bisp/domain-swarm';
+import { AgentDiscussion } from '@bisp/agent-bus';
 import { AuditTrail, makeAuditRecord } from '@bisp/shared-audit';
 import { PgRuntime } from '@bisp/shared-db';
 import type {
   AssistanceTicket,
   CommunicationDraft,
+  ContentCard,
   CustomerProfile,
   DomainEvent,
   ManagerObjective,
@@ -41,7 +43,7 @@ import { ROLE_PERMISSIONS, can, type RbacRole } from '@bisp/shared-rbac';
 import { demoCustomers, demoObjectives, demoOffers } from './demoData';
 import { AdminSettingsRepository } from './admin/settings';
 import { CharacterStudioRepository } from './admin/characters';
-import { CampaignRepository, OutboxStore, TaskRepository } from './localRepos';
+import { CampaignRepository, ContentCardRepository, OutboxStore, TaskRepository } from './localRepos';
 import type { ChannelDispatchRecord, MediaJobRecord } from './postgresMirror';
 import { PostgresMirror } from './postgresMirror';
 import { QueueGateway } from './queueGateway';
@@ -57,6 +59,7 @@ import {
 } from './services';
 
 export interface ApiState {
+  contentCards: ContentCardRepository;
   assistance: AssistanceRepository;
   campaigns: CampaignRepository;
   customers: CustomerRepository;
@@ -86,6 +89,7 @@ export interface ApiState {
 }
 
 export function buildState(seed?: { customers?: CustomerProfile[]; offers?: ProductOffer[]; objectives?: ManagerObjective[] }): ApiState {
+  const contentCards = new ContentCardRepository();
   const assistance = new AssistanceRepository();
   const campaigns = new CampaignRepository();
   const customers = new CustomerRepository();
@@ -136,6 +140,7 @@ export function buildState(seed?: { customers?: CustomerProfile[]; offers?: Prod
   ]);
 
   return {
+    contentCards,
     assistance,
     campaigns,
     customers,
@@ -188,15 +193,224 @@ function countTodayOneToOneDispatched(state: ApiState): number {
   }).length;
 }
 
+/**
+ * Genera uno .zip in-memory contenente il plugin WordPress CopilotRM.
+ * Formato: ZIP con un singolo entry PHP + readme.
+ * Usa formato ZIP senza compressione (store) per semplicità, no dipendenze esterne.
+ */
+function buildWordPressPluginZip(apiUrl: string): Buffer {
+  const pluginSlug = 'copilotrm-connector';
+  const phpContent = `<?php
+/**
+ * Plugin Name: CopilotRM Connector
+ * Plugin URI: ${apiUrl}
+ * Description: Connette WordPress a CopilotRM. Registra automaticamente il sito e permette la pubblicazione di articoli dall'agente redattore.
+ * Version: 1.0.0
+ * Author: CopilotRM
+ * License: MIT
+ */
+if (!defined('ABSPATH')) exit;
+
+define('COPILOTRM_API_URL', '${apiUrl}');
+define('COPILOTRM_SECRET_OPTION', 'copilotrm_plugin_secret');
+
+// Registrazione automatica all'attivazione del plugin
+register_activation_hook(__FILE__, 'copilotrm_activate');
+function copilotrm_activate() {
+    $secret = get_option(COPILOTRM_SECRET_OPTION);
+    if (!$secret) {
+        $secret = wp_generate_password(32, false);
+        update_option(COPILOTRM_SECRET_OPTION, $secret);
+    }
+    $site_url = get_site_url();
+    $site_title = get_bloginfo('name');
+    $payload = json_encode(['wpUrl' => $site_url, 'secret' => $secret, 'siteTitle' => $site_title]);
+    wp_remote_post(COPILOTRM_API_URL . '/api/integrations/wordpress/register', [
+        'headers' => ['Content-Type' => 'application/json'],
+        'body'    => $payload,
+        'timeout' => 15,
+    ]);
+}
+
+// REST API: POST /wp-json/copilotrm/v1/articles
+add_action('rest_api_init', function () {
+    register_rest_route('copilotrm/v1', '/articles', [
+        'methods'             => 'POST',
+        'callback'            => 'copilotrm_create_article',
+        'permission_callback' => 'copilotrm_auth_check',
+    ]);
+});
+
+function copilotrm_auth_check(WP_REST_Request \$request) {
+    $secret = get_option(COPILOTRM_SECRET_OPTION);
+    return \$request->get_header('X-CopilotRM-Secret') === \$secret;
+}
+
+function copilotrm_create_article(WP_REST_Request \$request) {
+    \$params = \$request->get_json_params();
+    \$title   = sanitize_text_field(\$params['title'] ?? '');
+    \$content = wp_kses_post(\$params['content'] ?? '');
+    \$excerpt = sanitize_textarea_field(\$params['excerpt'] ?? '');
+    \$status  = in_array(\$params['status'] ?? 'draft', ['publish', 'draft', 'pending']) ? \$params['status'] : 'draft';
+
+    if (!$title || !$content) {
+        return new WP_Error('missing_fields', 'title e content obbligatori', ['status' => 400]);
+    }
+
+    \$post_id = wp_insert_post([
+        'post_title'   => \$title,
+        'post_content' => \$content,
+        'post_excerpt' => \$excerpt,
+        'post_status'  => \$status,
+        'post_type'    => 'post',
+    ]);
+
+    if (is_wp_error(\$post_id)) {
+        return new WP_Error('insert_failed', \$post_id->get_error_message(), ['status' => 500]);
+    }
+
+    // Featured image da URL
+    if (!empty(\$params['imageUrl'])) {
+        \$image_id = copilotrm_sideload_image(\$params['imageUrl'], \$post_id);
+        if (\$image_id && !is_wp_error(\$image_id)) {
+            set_post_thumbnail(\$post_id, \$image_id);
+        }
+    }
+
+    return ['ok' => true, 'postId' => \$post_id, 'link' => get_permalink(\$post_id)];
+}
+
+function copilotrm_sideload_image(\$url, \$post_id) {
+    require_once ABSPATH . 'wp-admin/includes/media.php';
+    require_once ABSPATH . 'wp-admin/includes/file.php';
+    require_once ABSPATH . 'wp-admin/includes/image.php';
+    \$tmp = download_url(\$url);
+    if (is_wp_error(\$tmp)) return \$tmp;
+    \$file = ['name' => basename(parse_url(\$url, PHP_URL_PATH)), 'tmp_name' => \$tmp];
+    return media_handle_sideload(\$file, \$post_id);
+}
+`;
+
+  // Build minimal ZIP (store, no compression) manually
+  const encoder = new TextEncoder();
+  const fileName = `${pluginSlug}/${pluginSlug}.php`;
+  const fileData = Buffer.from(phpContent, 'utf-8');
+  const fileNameBuf = Buffer.from(fileName, 'utf-8');
+
+  function crc32(buf: Buffer): number {
+    const table = (() => {
+      const t = new Uint32Array(256);
+      for (let i = 0; i < 256; i++) {
+        let c = i;
+        for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+        t[i] = c;
+      }
+      return t;
+    })();
+    let crc = 0xffffffff;
+    for (let i = 0; i < buf.length; i++) crc = table[(crc ^ buf[i]) & 0xff] ^ (crc >>> 8);
+    return (crc ^ 0xffffffff) >>> 0;
+  }
+
+  const crc = crc32(fileData);
+  const now = new Date();
+  const dosDate = ((now.getFullYear() - 1980) << 9) | ((now.getMonth() + 1) << 5) | now.getDate();
+  const dosTime = (now.getHours() << 11) | (now.getMinutes() << 5) | Math.floor(now.getSeconds() / 2);
+
+  // Local file header
+  const lfh = Buffer.alloc(30 + fileNameBuf.length);
+  lfh.writeUInt32LE(0x04034b50, 0); // signature
+  lfh.writeUInt16LE(20, 4);         // version needed
+  lfh.writeUInt16LE(0, 6);          // flags
+  lfh.writeUInt16LE(0, 8);          // compression: store
+  lfh.writeUInt16LE(dosTime, 10);
+  lfh.writeUInt16LE(dosDate, 12);
+  lfh.writeUInt32LE(crc, 14);
+  lfh.writeUInt32LE(fileData.length, 18); // compressed size
+  lfh.writeUInt32LE(fileData.length, 22); // uncompressed size
+  lfh.writeUInt16LE(fileNameBuf.length, 26);
+  lfh.writeUInt16LE(0, 28);
+  fileNameBuf.copy(lfh, 30);
+
+  const localOffset = 0;
+
+  // Central directory header
+  const cdh = Buffer.alloc(46 + fileNameBuf.length);
+  cdh.writeUInt32LE(0x02014b50, 0); // signature
+  cdh.writeUInt16LE(20, 4);         // version made by
+  cdh.writeUInt16LE(20, 6);         // version needed
+  cdh.writeUInt16LE(0, 8);
+  cdh.writeUInt16LE(0, 10);         // compression: store
+  cdh.writeUInt16LE(dosTime, 12);
+  cdh.writeUInt16LE(dosDate, 14);
+  cdh.writeUInt32LE(crc, 16);
+  cdh.writeUInt32LE(fileData.length, 20);
+  cdh.writeUInt32LE(fileData.length, 24);
+  cdh.writeUInt16LE(fileNameBuf.length, 28);
+  cdh.writeUInt16LE(0, 30);         // extra
+  cdh.writeUInt16LE(0, 32);         // comment
+  cdh.writeUInt16LE(0, 34);         // disk start
+  cdh.writeUInt16LE(0, 36);         // int attr
+  cdh.writeUInt32LE(0, 38);         // ext attr
+  cdh.writeUInt32LE(localOffset, 42); // local header offset
+  fileNameBuf.copy(cdh, 46);
+
+  const cdhOffset = lfh.length + fileData.length;
+
+  // End of central directory
+  const eocd = Buffer.alloc(22);
+  eocd.writeUInt32LE(0x06054b50, 0);
+  eocd.writeUInt16LE(0, 4);
+  eocd.writeUInt16LE(0, 6);
+  eocd.writeUInt16LE(1, 8);         // total entries this disk
+  eocd.writeUInt16LE(1, 10);        // total entries
+  eocd.writeUInt32LE(cdh.length, 12);
+  eocd.writeUInt32LE(cdhOffset, 16);
+  eocd.writeUInt16LE(0, 20);
+
+  void encoder; // suppress unused warning
+  return Buffer.concat([lfh, fileData, cdh, eocd]);
+}
+
 async function broadcastSwarmDebug(state: ApiState, runId: string, eventType: string, tasksCount: number, draftsCount: number): Promise<void> {
   if (!envFlag('SWARM_DEBUG_TELEGRAM', false)) return;
   try {
     const snap = state.swarmRuntime.snapshot(runId);
-    const msgLines = snap.messages.slice(0, 6).map((m) =>
-      `  ${m.fromAgent}${m.toAgent ? `→${m.toAgent}` : ''} [${m.kind}]: ${m.content.slice(0, 80)}`
-    );
     const agentsStr = snap.run?.agentsInvolved?.join(', ') ?? '?';
-    const text = [`🤖 RUN #${runId.slice(-6)} | ${eventType}`, ...msgLines, `✅ ${tasksCount} task | ${draftsCount} draft | agents: ${agentsStr}`].join('\n');
+
+    // Raggruppa messaggi per kind: prima osservazioni/proposte, poi handoff/decisioni
+    const observations = snap.messages.filter((m) => m.kind === 'observation' || m.kind === 'proposal');
+    const decisions = snap.messages.filter((m) => m.kind === 'handoff' || m.kind === 'decision');
+
+    const lines: string[] = [`🤖 <b>RUN #${runId.slice(-6)}</b> | <code>${eventType}</code>`];
+
+    if (observations.length > 0) {
+      lines.push('\n<b>Analisi agenti:</b>');
+      for (const m of observations.slice(0, 4)) {
+        const icon = m.kind === 'proposal' ? '💡' : '🔍';
+        lines.push(`${icon} <b>${m.fromAgent}</b>: ${m.content.slice(0, 100)}${m.content.length > 100 ? '…' : ''}`);
+      }
+    }
+
+    if (decisions.length > 0) {
+      lines.push('\n<b>Handoff e decisioni:</b>');
+      for (const m of decisions.slice(0, 3)) {
+        const icon = m.kind === 'handoff' ? '🔀' : '✅';
+        const dir = m.toAgent ? ` → ${m.toAgent}` : '';
+        lines.push(`${icon} <b>${m.fromAgent}${dir}</b>: ${m.content.slice(0, 100)}${m.content.length > 100 ? '…' : ''}`);
+      }
+    }
+
+    if (snap.handoffs.length > 0) {
+      const execHandoffs = snap.handoffs.filter((h) => h.status === 'executed');
+      if (execHandoffs.length > 0) {
+        lines.push(`\n<b>Handoff eseguiti:</b> ${execHandoffs.map((h) => `${h.fromAgent}→${h.toAgent}`).join(', ')}`);
+      }
+    }
+
+    lines.push(`\n📊 ${tasksCount} task | ${draftsCount} draft | agents: ${agentsStr}`);
+
+    const text = lines.join('\n');
     await state.channels.telegram.broadcastToGroups(text);
   } catch { /* best-effort */ }
 }
@@ -1655,6 +1869,90 @@ export function buildServer(state = buildState()) {
     }
   );
 
+  // ─── Content Cards: persist + approval ──────────────────────────────────────
+
+  // POST /api/content/cards — worker-content invia la card generata
+  app.post<{ Body: ContentCard }>('/api/content/cards', async (req, reply) => {
+    const card = req.body;
+    if (!card?.id || !card?.source || !card?.title) {
+      return reply.code(400).send({ error: 'id, source, title obbligatori' });
+    }
+    state.contentCards.add({ ...card, approvalStatus: card.approvalStatus ?? 'pending', createdAt: card.createdAt ?? new Date().toISOString() });
+    return reply.code(201).send({ ok: true, id: card.id });
+  });
+
+  app.get('/api/content/cards', async (req) => {
+    const qs = req.query as { status?: string };
+    const approvalStatus = (qs.status as ContentCard['approvalStatus']) || undefined;
+    return state.contentCards.list(approvalStatus ? { approvalStatus } : undefined);
+  });
+
+  app.get<{ Params: { cardId: string } }>('/api/content/cards/:cardId', async (req, reply) => {
+    const card = state.contentCards.getById(req.params.cardId);
+    if (!card) return reply.code(404).send({ error: 'Card not found' });
+    return card;
+  });
+
+  app.patch<{ Params: { cardId: string } }>(
+    '/api/content/cards/:cardId/approve',
+    async (req, reply) => {
+      if (ensurePermission(req, reply, 'manager:write') === null) return;
+      const role = (req.headers['x-bisp-role'] as string) ?? 'manager';
+      const card = state.contentCards.update(req.params.cardId, {
+        approvalStatus: 'approved',
+        approvedBy: role,
+        approvedAt: new Date().toISOString(),
+      });
+      if (!card) return reply.code(404).send({ error: 'Card not found' });
+      state.audit.write(makeAuditRecord('content', 'content_card.approved', { cardId: card.id, title: card.title }));
+      return card;
+    }
+  );
+
+  app.patch<{ Params: { cardId: string } }>(
+    '/api/content/cards/:cardId/reject',
+    async (req, reply) => {
+      if (ensurePermission(req, reply, 'manager:write') === null) return;
+      const role = (req.headers['x-bisp-role'] as string) ?? 'manager';
+      const card = state.contentCards.update(req.params.cardId, {
+        approvalStatus: 'rejected',
+        approvedBy: role,
+        approvedAt: new Date().toISOString(),
+      });
+      if (!card) return reply.code(404).send({ error: 'Card not found' });
+      state.audit.write(makeAuditRecord('content', 'content_card.rejected', { cardId: card.id, title: card.title }));
+      return card;
+    }
+  );
+
+  // ─── WordPress plugin: self-registration ────────────────────────────────────
+  app.post<{ Body: { wpUrl: string; secret: string; siteTitle?: string } }>(
+    '/api/integrations/wordpress/register',
+    async (req, reply) => {
+      const { wpUrl, secret, siteTitle } = req.body ?? {};
+      if (!wpUrl || !secret) {
+        return reply.code(400).send({ error: 'wpUrl e secret obbligatori' });
+      }
+      state.adminSettings.upsert('wordpress_site_url', wpUrl);
+      state.adminSettings.upsert('wordpress_plugin_secret', secret);
+      if (siteTitle) state.adminSettings.upsert('wordpress_site_title', siteTitle);
+      await state.adminSettings.persist();
+      state.audit.write(makeAuditRecord('integrations', 'wordpress.plugin.registered', { wpUrl, siteTitle: siteTitle ?? '' }));
+      return { ok: true, message: 'WordPress plugin registrato correttamente' };
+    }
+  );
+
+  // GET /api/download/wordpress-plugin — scarica il plugin .zip
+  app.get('/api/download/wordpress-plugin', async (req, reply) => {
+    const apiUrl = process.env.COPILOTRM_API_URL ?? `http://localhost:${process.env.PORT_API_CORE ?? 4010}`;
+    const pluginZip = buildWordPressPluginZip(apiUrl);
+    void reply
+      .header('Content-Type', 'application/zip')
+      .header('Content-Disposition', 'attachment; filename="copilotrm-wp-plugin.zip"')
+      .header('Content-Length', String(pluginZip.length));
+    return reply.send(pluginZip);
+  });
+
   // ─── CopilotRM Chat endpoint ─────────────────────────────────────────────
 
   app.post<{
@@ -1677,12 +1975,40 @@ export function buildServer(state = buildState()) {
       const stub = customer
         ? `Ciao! Sono CopilotRM. Stai lavorando con il cliente ${customer.fullName} (segmenti: ${customer.segments?.join(', ')}). LLM non configurato — imposta LLM_PROVIDER nel file .env per risposte AI reali. Messaggio ricevuto: "${message}".`
         : `Ciao! Sono CopilotRM. LLM non configurato — imposta LLM_PROVIDER nel file .env. Messaggio ricevuto: "${message}".`;
-      return { reply: stub, provider: 'stub', sessionId: req.body.sessionId };
+      return { reply: stub, provider: 'stub', swarmRunId: null, discussion: null, sessionId: req.body.sessionId };
     }
 
     const characters = state.characterStudio.list();
     const mainChar = characters.find((c) => c.enabled) ?? characters[0];
 
+    // Contesto cliente per il topic della discussion
+    const customerCtx = customer
+      ? `Cliente: ${customer.fullName}. Segmenti: ${customer.segments?.join(', ') ?? 'nessuno'}. Interessi: ${customer.interests?.join(', ') ?? 'nessuno'}.`
+      : 'Nessun cliente specifico selezionato.';
+
+    // Agenti specialistici della chat swarm
+    const CHAT_AGENTS = [
+      { name: 'Assistenza', role: 'esperto di assistenza tecnica e riparazione dispositivi elettronici', persona: 'Valuto problemi tecnici, garanzie, e storico interventi del cliente.' },
+      { name: 'Commerciale', role: 'agente commerciale per offerte, preventivi e upsell', persona: 'Propongo offerte pertinenti, verifico disponibilità prodotti e opportunità di vendita.' },
+      { name: 'CustomerCare', role: 'esperto di fidelizzazione e soddisfazione cliente', persona: 'Considero il profilo cliente, la sua storia e il valore a lungo termine.' },
+    ];
+
+    // Mini-swarm: ogni agente risponde alla domanda con il suo punto di vista
+    const discussion = new AgentDiscussion(state.llm);
+    let discussionResult;
+    try {
+      discussionResult = await discussion.discuss({
+        topic: message,
+        context: customerCtx,
+        agents: CHAT_AGENTS,
+        rounds: 1,
+        maxWordsPerTurn: 60,
+      });
+    } catch {
+      discussionResult = null;
+    }
+
+    // Sintesi finale con la persona principale
     const systemLines: string[] = [
       'Sei CopilotRM, un assistente AI per la gestione clienti di un negozio di elettronica e telecomunicazioni.',
     ];
@@ -1692,27 +2018,85 @@ export function buildServer(state = buildState()) {
       if (mainChar.goals?.length) systemLines.push(`Obiettivi: ${mainChar.goals.join('; ')}.`);
       if (mainChar.limits?.length) systemLines.push(`Limiti: ${mainChar.limits.join('; ')}.`);
     }
-    systemLines.push('Rispondi sempre in italiano, in modo conciso e orientato all\'azione.');
-
+    systemLines.push("Rispondi sempre in italiano, in modo conciso e orientato all'azione.");
     if (customer) {
       systemLines.push(`Stai assistendo con il cliente: ${customer.fullName}.`);
       if (customer.segments?.length) systemLines.push(`Segmenti cliente: ${customer.segments.join(', ')}.`);
       if (customer.interests?.length) systemLines.push(`Interessi: ${customer.interests.join(', ')}.`);
     }
 
+    // Se la discussion ha prodotto contributi, includili come contesto
+    const discussionContext = discussionResult?.messages.length
+      ? `\nContributi dei tuoi agenti specialistici:\n${discussionResult.messages.map((m) => `- ${m.agent}: ${m.content}`).join('\n')}\n\nSintesi: ${discussionResult.synthesis ?? 'nessuna'}`
+      : '';
+
+    // Registra swarm run nella swarm runtime per Swarm Studio
+    const chatEvent: DomainEvent = {
+      id: makeId('evt'),
+      type: 'chat.message',
+      occurredAt: new Date().toISOString(),
+      payload: { message: message.slice(0, 100), customerId: customerId ?? null },
+    };
+    const chatCtx = {
+      event: chatEvent,
+      customer,
+      activeObjectives: state.objectives.listActive(),
+      activeOffers: state.offers.listActive(),
+      now: new Date().toISOString(),
+    };
+
+    let swarmRunId: string | null = null;
+    try {
+      const { runId } = await state.orchestrator.runSwarm(chatCtx, state.swarmRuntime);
+      swarmRunId = runId;
+      // Aggiungi messaggi della discussion come swarm messages per la Swarm Studio
+      if (discussionResult?.messages.length) {
+        for (const dm of discussionResult.messages) {
+          state.swarmRuntime.addMessage({
+            id: makeId('msg'),
+            runId,
+            stepNo: 99,
+            fromAgent: dm.agent,
+            kind: 'observation',
+            content: dm.content,
+            createdAt: new Date().toISOString(),
+          });
+        }
+        if (discussionResult.synthesis) {
+          state.swarmRuntime.addMessage({
+            id: makeId('msg'),
+            runId,
+            stepNo: 100,
+            fromAgent: 'Moderatore',
+            kind: 'decision',
+            content: discussionResult.synthesis,
+            createdAt: new Date().toISOString(),
+          });
+        }
+      }
+      void broadcastSwarmDebug(state, runId, 'chat.message', 0, 0);
+    } catch { /* non-blocking */ }
+
     try {
       const res = await state.llm.chat(
         [
           { role: 'system', content: systemLines.join(' ') },
-          { role: 'user', content: message },
+          { role: 'user', content: `${message}${discussionContext}` },
         ],
         { maxTokens: 512, temperature: 0.7 }
       );
-      state.audit.write(makeAuditRecord('chat', 'chat.response', { customerId: customerId ?? null, provider: res.provider }));
-      return { reply: res.content, provider: res.provider, model: res.model, sessionId: req.body.sessionId };
+      state.audit.write(makeAuditRecord('chat', 'chat.response', { customerId: customerId ?? null, provider: res.provider, swarmRunId }));
+      return {
+        reply: res.content,
+        provider: res.provider,
+        model: res.model,
+        swarmRunId,
+        discussion: discussionResult ? { messages: discussionResult.messages, synthesis: discussionResult.synthesis } : null,
+        sessionId: req.body.sessionId,
+      };
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      return { reply: `Errore LLM: ${msg}`, provider: 'error', sessionId: req.body.sessionId };
+      return { reply: `Errore LLM: ${msg}`, provider: 'error', swarmRunId, discussion: null, sessionId: req.body.sessionId };
     }
   });
 

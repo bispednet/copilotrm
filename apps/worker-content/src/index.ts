@@ -14,6 +14,26 @@ import type { ContentCard, DaneaInvoiceLine } from '@bisp/shared-types';
 
 const ean = new EanLookupClient();
 
+const API_CORE_URL = process.env.API_CORE_URL ?? `http://localhost:${process.env.PORT_API_CORE ?? 4010}`;
+
+/** Registra una ContentCard nell'api-core per renderla disponibile all'approval UI */
+async function registerCardInApiCore(card: ContentCard): Promise<void> {
+  try {
+    const res = await fetch(`${API_CORE_URL}/api/content/cards`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-bisp-role': 'worker' },
+      body: JSON.stringify(card),
+      signal: AbortSignal.timeout(5000),
+    });
+    if (!res.ok) {
+      const text = await res.text().catch(() => '');
+      logger.warn('worker-content: registerCardInApiCore failed', { status: res.status, text });
+    }
+  } catch (err) {
+    logger.warn('worker-content: registerCardInApiCore error (api-core not reachable?)', { error: String(err) });
+  }
+}
+
 const redisUrl = process.env.REDIS_URL ?? 'redis://localhost:6379';
 const queueMode = /^(redis|bullmq)$/i.test(process.env.BISPCRM_QUEUE_MODE ?? 'inline') ? 'redis' : 'inline';
 const rag = new InMemoryRAGStore();
@@ -246,7 +266,10 @@ async function runInvoiceContentPipeline(payload: {
     };
     cards.push(card);
 
-    // 4. Pubblica su WordPress come draft
+    // 4. Registra nell'api-core per l'approval UI (fire-and-forget)
+    void registerCardInApiCore(card);
+
+    // 5. Pubblica su WordPress come draft
     if (wp) {
       try {
         const titleMatch = blogDraft.match(/<h[12][^>]*>(.*?)<\/h[12]>/s);
