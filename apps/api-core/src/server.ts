@@ -372,6 +372,279 @@ function copilotrm_sideload_image(\$url, \$post_id) {
   return Buffer.concat([lfh, fileData, cdh, eocd]);
 }
 
+// ── Chat Orchestration: discussione multi-agente strutturata ─────────────────
+
+/** Tipo di un singolo messaggio nel thread visibile della chat */
+export interface ChatSwarmMsg {
+  agent: string;
+  agentRole: string;
+  content: string;
+  kind: 'brief' | 'analysis' | 'critique' | 'defense' | 'synthesis';
+  mentions: string[];
+  round: number;
+}
+
+/** Map nome→ruolo degli agenti disponibili nella chat swarm */
+const CHAT_SWARM_AGENTS: Record<string, string> = {
+  Assistenza:   'specialista assistenza tecnica e riparazione dispositivi',
+  Commerciale:  'agente commerciale, offerte, preventivi, upsell/cross-sell',
+  Hardware:     'esperto hardware: PC, smartphone, componenti, configurazioni',
+  Telefonia:    'esperto connettività e tariffe telefoniche/internet',
+  CustomerCare: 'specialista fidelizzazione e soddisfazione cliente',
+};
+
+interface LLMClientLike {
+  chat(
+    messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }>,
+    opts?: { tier?: 'small' | 'medium' | 'large'; maxTokens?: number; temperature?: number }
+  ): Promise<{ content: string; provider: string; model?: string }>;
+}
+
+function extractMentions(text: string): string[] {
+  return [...new Set((text.match(/@([A-Za-z]+)/g) ?? []).map((m) => m.slice(1)).filter((a) => a in CHAT_SWARM_AGENTS))];
+}
+
+/**
+ * Orchestrazione chat multi-agente con:
+ * 1. Orchestratore: analizza richiesta, decide agenti, scrive brief con @mentions
+ * 2. Agenti coinvolti: rispondono in parallelo; un agente può taggarne altri
+ * 3. Agenti extra: eventuali agenti taggati dai colleghi rispondono
+ * 4. Critico: sfida le proposte (adversarial prompting)
+ * 5. Difesa: gli agenti sfidati si difendono
+ * 6. Moderatore: sintesi finale → usata come risposta
+ */
+async function runChatOrchestration(params: {
+  llm: LLMClientLike;
+  message: string;
+  customerCtx: string;
+  activeOfferTitles: string[];
+}): Promise<{ thread: ChatSwarmMsg[]; synthesis: string }> {
+  const { llm, message, customerCtx, activeOfferTitles } = params;
+  const thread: ChatSwarmMsg[] = [];
+  const agentResponses: Record<string, string> = {};
+
+  const offersCtx = activeOfferTitles.length
+    ? `Offerte disponibili: ${activeOfferTitles.slice(0, 6).join(', ')}.`
+    : '';
+
+  const agentList = Object.entries(CHAT_SWARM_AGENTS)
+    .map(([n, r]) => `@${n} (${r})`)
+    .join('; ');
+
+  // ── Step 1: Orchestratore decide chi coinvolgere e scrive il brief ──────────
+  let orchestratorBrief = '';
+  let involvedAgents: string[] = [];
+
+  try {
+    const resp = await llm.chat([
+      {
+        role: 'system',
+        content: [
+          'Sei l\'Orchestratore di CopilotRM, coordinatore di un team multi-agente per un negozio di elettronica italiano.',
+          `Hai a disposizione: ${agentList}.`,
+          'Analizza la richiesta dell\'operatore e scegli i 2-3 agenti più rilevanti.',
+          'Scrivi un brief conciso (max 80 parole) taggandoli con @NomeAgente.',
+          'Includi il contesto cliente e la domanda specifica per ciascun agente.',
+          'Rispondi SOLO con il brief, in italiano.',
+        ].join(' '),
+      },
+      { role: 'user', content: `Richiesta operatore: "${message}"\n${customerCtx}\n${offersCtx}` },
+    ], { tier: 'small', maxTokens: 160 });
+
+    orchestratorBrief = resp.content.trim();
+    involvedAgents = extractMentions(orchestratorBrief);
+    if (involvedAgents.length === 0) involvedAgents = ['Assistenza', 'Commerciale'];
+  } catch {
+    orchestratorBrief = `@Assistenza @Commerciale — Analizzare la richiesta: "${message}". ${customerCtx}`;
+    involvedAgents = ['Assistenza', 'Commerciale'];
+  }
+
+  thread.push({
+    agent: 'Orchestratore',
+    agentRole: 'coordinatore del team',
+    content: orchestratorBrief,
+    kind: 'brief',
+    mentions: involvedAgents,
+    round: 0,
+  });
+
+  // ── Step 2: Agenti coinvolti rispondono in parallelo ────────────────────────
+  const agentResults = await Promise.allSettled(
+    involvedAgents.map(async (agentName) => {
+      const agentRole = CHAT_SWARM_AGENTS[agentName] ?? 'agente specialistico';
+      const resp = await llm.chat([
+        {
+          role: 'system',
+          content: [
+            `Sei ${agentName}, ${agentRole} in un negozio di elettronica italiano.`,
+            'Rispondi al brief dell\'Orchestratore (max 70 parole).',
+            'Sii diretto: indica cosa fare ADESSO e cosa si può proporre al cliente.',
+            'Se ritieni utile il contributo di un altro agente, taggalo con @NomeAgente.',
+            'Rispondi in italiano.',
+          ].join(' '),
+        },
+        { role: 'user', content: `Brief Orchestratore: ${orchestratorBrief}\n${customerCtx}\n${offersCtx}` },
+      ], { tier: 'small', maxTokens: 140 });
+      return { agentName, content: resp.content.trim(), agentRole };
+    })
+  );
+
+  const extraAgentsCalled = new Set<string>();
+
+  for (const result of agentResults) {
+    const content = result.status === 'fulfilled'
+      ? result.value.content
+      : `[${involvedAgents[agentResults.indexOf(result)]} non disponibile]`;
+    const agentName = result.status === 'fulfilled' ? result.value.agentName : involvedAgents[agentResults.indexOf(result)];
+    const agentRole = result.status === 'fulfilled' ? result.value.agentRole : CHAT_SWARM_AGENTS[agentName] ?? '';
+
+    agentResponses[agentName] = content;
+    const mentions = extractMentions(content).filter((a) => !involvedAgents.includes(a));
+    mentions.forEach((m) => extraAgentsCalled.add(m));
+
+    thread.push({ agent: agentName, agentRole, content, kind: 'analysis', mentions, round: 1 });
+  }
+
+  // ── Step 3: Agenti extra taggati dai colleghi ────────────────────────────────
+  if (extraAgentsCalled.size > 0) {
+    const prevThread = thread.map((m) => `${m.agent}: ${m.content}`).join('\n');
+    const extraResults = await Promise.allSettled(
+      [...extraAgentsCalled].slice(0, 2).map(async (agentName) => {
+        const agentRole = CHAT_SWARM_AGENTS[agentName] ?? 'agente specialistico';
+        const resp = await llm.chat([
+          {
+            role: 'system',
+            content: [
+              `Sei ${agentName}, ${agentRole}.`,
+              'Sei stato chiamato dai tuoi colleghi. Rispondi al punto specifico che ti riguarda (max 60 parole).',
+              'Rispondi in italiano.',
+            ].join(' '),
+          },
+          { role: 'user', content: `Discussione in corso:\n${prevThread}\n${customerCtx}` },
+        ], { tier: 'small', maxTokens: 120 });
+        return { agentName, agentRole, content: resp.content.trim() };
+      })
+    );
+
+    for (const result of extraResults) {
+      if (result.status === 'fulfilled') {
+        const { agentName, agentRole, content } = result.value;
+        agentResponses[agentName] = content;
+        thread.push({ agent: agentName, agentRole, content, kind: 'analysis', mentions: [], round: 1 });
+      }
+    }
+  }
+
+  // ── Step 4: Critico — adversarial challenge ──────────────────────────────────
+  const proposalsSummary = Object.entries(agentResponses)
+    .map(([a, c]) => `${a}: ${c}`)
+    .join('\n');
+
+  let criticContent = '';
+  let criticMentions: string[] = [];
+
+  try {
+    const resp = await llm.chat([
+      {
+        role: 'system',
+        content: [
+          'Sei il Critico di CopilotRM, revisore avversariale del team.',
+          'Analizza le proposte degli agenti e identifica: informazioni mancanti, proposte premature, contraddizioni, o punti deboli.',
+          'Sii costruttivo ma diretto (max 60 parole). Tagga con @NomeAgente gli agenti che devono approfondire.',
+          'Non sfidare se le proposte sono solide: in quel caso, semplicemente conferma.',
+          'Rispondi in italiano.',
+        ].join(' '),
+      },
+      {
+        role: 'user',
+        content: `Richiesta originale: "${message}"\n${customerCtx}\n\nProposte agenti:\n${proposalsSummary}`,
+      },
+    ], { tier: 'small', maxTokens: 120 });
+
+    criticContent = resp.content.trim();
+    criticMentions = extractMentions(criticContent);
+  } catch {
+    criticContent = '[Critico non disponibile]';
+  }
+
+  thread.push({
+    agent: 'Critico',
+    agentRole: 'revisore avversariale',
+    content: criticContent,
+    kind: 'critique',
+    mentions: criticMentions,
+    round: 2,
+  });
+
+  // ── Step 5: Agenti sfidati si difendono in parallelo ────────────────────────
+  if (criticMentions.length > 0) {
+    const defenseResults = await Promise.allSettled(
+      criticMentions.slice(0, 2).map(async (agentName) => {
+        const agentRole = CHAT_SWARM_AGENTS[agentName] ?? 'agente';
+        const originalProposal = agentResponses[agentName] ?? '';
+        const resp = await llm.chat([
+          {
+            role: 'system',
+            content: [
+              `Sei ${agentName}, ${agentRole}.`,
+              'Il Critico ha sollevato dubbi sulla tua proposta.',
+              'Rispondi alla critica rafforzando o affinando la tua posizione (max 50 parole).',
+              'Sii concreto: indica i passi precisi da fare. Rispondi in italiano.',
+            ].join(' '),
+          },
+          {
+            role: 'user',
+            content: `Tua proposta originale: ${originalProposal}\n\nCritica del Critico: ${criticContent}`,
+          },
+        ], { tier: 'small', maxTokens: 100 });
+        return { agentName, agentRole, content: resp.content.trim() };
+      })
+    );
+
+    for (const result of defenseResults) {
+      if (result.status === 'fulfilled') {
+        const { agentName, agentRole, content } = result.value;
+        thread.push({ agent: agentName, agentRole, content, kind: 'defense', mentions: ['Critico'], round: 3 });
+      }
+    }
+  }
+
+  // ── Step 6: Moderatore sintetizza → risposta finale ──────────────────────────
+  const fullThread = thread.map((m) => `[${m.agent}]: ${m.content}`).join('\n');
+  let synthesis = proposalsSummary;
+
+  try {
+    const resp = await llm.chat([
+      {
+        role: 'system',
+        content: [
+          'Sei il Moderatore di CopilotRM.',
+          'Sintetizza la discussione del team in un\'azione consigliata chiara per l\'operatore del negozio (max 100 parole).',
+          'Scrivi come se stessi parlando all\'operatore: "Consiglio di..." o "Prossimo passo:".',
+          'Includi: azione immediata, proposta commerciale se rilevante, eventuale follow-up.',
+          'Rispondi in italiano.',
+        ].join(' '),
+      },
+      {
+        role: 'user',
+        content: `Richiesta originale: "${message}"\n${customerCtx}\n\nDiscussione del team:\n${fullThread}`,
+      },
+    ], { tier: 'small', maxTokens: 200 });
+    synthesis = resp.content.trim();
+  } catch { /* usa proposalsSummary come fallback */ }
+
+  thread.push({
+    agent: 'Moderatore',
+    agentRole: 'sintesi finale',
+    content: synthesis,
+    kind: 'synthesis',
+    mentions: [],
+    round: 4,
+  });
+
+  return { thread, synthesis };
+}
+
 async function broadcastSwarmDebug(state: ApiState, runId: string, eventType: string, tasksCount: number, draftsCount: number): Promise<void> {
   if (!envFlag('SWARM_DEBUG_TELEGRAM', false)) return;
   try {
@@ -1962,74 +2235,66 @@ export function buildServer(state = buildState()) {
       return reply.code(400).send({ error: 'message è obbligatorio' });
     }
 
-    const customer = customerId ? state.customers.getById(customerId) : undefined;
+    // Customer resolution: ID esatto → fallback nome nel customerId → fallback nome nel messaggio
+    let customer = customerId ? state.customers.getById(customerId) : undefined;
+    if (!customer && customerId) {
+      const needle = customerId.toLowerCase().trim();
+      customer = state.customers.list().find((c) =>
+        c.fullName.toLowerCase().includes(needle) || c.phone?.includes(needle)
+      );
+    }
+    if (!customer) {
+      const allCustomers = state.customers.list();
+      for (const c of allCustomers) {
+        if (message.toLowerCase().includes(c.fullName.toLowerCase())) {
+          customer = c;
+          break;
+        }
+      }
+    }
+
+    // Contesto cliente ricco
+    const customerCtx = customer
+      ? [
+          `Cliente: ${customer.fullName} (ID: ${customer.id}).`,
+          `Segmenti: ${customer.segments?.join(', ') || 'nessuno'}.`,
+          customer.interests?.length ? `Interessi: ${customer.interests.join(', ')}.` : '',
+          customer.phone ? `Tel: ${customer.phone}.` : '',
+        ].filter(Boolean).join(' ')
+      : 'Nessun cliente selezionato.';
 
     // Stub response when LLM is not configured
     if (!state.llm) {
       const stub = customer
-        ? `Ciao! Sono CopilotRM. Stai lavorando con il cliente ${customer.fullName} (segmenti: ${customer.segments?.join(', ')}). LLM non configurato — imposta LLM_PROVIDER nel file .env per risposte AI reali. Messaggio ricevuto: "${message}".`
-        : `Ciao! Sono CopilotRM. LLM non configurato — imposta LLM_PROVIDER nel file .env. Messaggio ricevuto: "${message}".`;
-      return { reply: stub, provider: 'stub', swarmRunId: null, discussion: null, sessionId: req.body.sessionId };
+        ? `[CopilotRM] Nessun LLM configurato. Cliente trovato: ${customer.fullName} (${customer.segments?.join(', ')}). Imposta LLM_PROVIDER nel .env.`
+        : `[CopilotRM] Nessun LLM configurato. Imposta LLM_PROVIDER nel .env. Messaggio: "${message}"`;
+      return { reply: stub, provider: 'stub', swarmRunId: null, swarmThread: [], sessionId: req.body.sessionId };
     }
 
-    const characters = state.characterStudio.list();
-    const mainChar = characters.find((c) => c.enabled) ?? characters[0];
+    const activeOfferTitles = state.offers.listActive().map((o) => o.title);
 
-    // Contesto cliente per il topic della discussion
-    const customerCtx = customer
-      ? `Cliente: ${customer.fullName}. Segmenti: ${customer.segments?.join(', ') ?? 'nessuno'}. Interessi: ${customer.interests?.join(', ') ?? 'nessuno'}.`
-      : 'Nessun cliente specifico selezionato.';
-
-    // Agenti specialistici della chat swarm
-    const CHAT_AGENTS = [
-      { name: 'Assistenza', role: 'esperto di assistenza tecnica e riparazione dispositivi elettronici', persona: 'Valuto problemi tecnici, garanzie, e storico interventi del cliente.' },
-      { name: 'Commerciale', role: 'agente commerciale per offerte, preventivi e upsell', persona: 'Propongo offerte pertinenti, verifico disponibilità prodotti e opportunità di vendita.' },
-      { name: 'CustomerCare', role: 'esperto di fidelizzazione e soddisfazione cliente', persona: 'Considero il profilo cliente, la sua storia e il valore a lungo termine.' },
-    ];
-
-    // Mini-swarm: ogni agente risponde alla domanda con il suo punto di vista
-    const discussion = new AgentDiscussion(state.llm);
-    let discussionResult;
+    // ── Orchestrazione multi-agente ──────────────────────────────────────────
+    let swarmThread: ChatSwarmMsg[] = [];
+    let synthesis = '';
     try {
-      discussionResult = await discussion.discuss({
-        topic: message,
-        context: customerCtx,
-        agents: CHAT_AGENTS,
-        rounds: 1,
-        maxWordsPerTurn: 60,
+      const orch = await runChatOrchestration({
+        llm: state.llm,
+        message,
+        customerCtx,
+        activeOfferTitles,
       });
-    } catch {
-      discussionResult = null;
+      swarmThread = orch.thread;
+      synthesis = orch.synthesis;
+    } catch (err) {
+      synthesis = `Errore orchestrazione: ${err instanceof Error ? err.message : String(err)}`;
     }
 
-    // Sintesi finale con la persona principale
-    const systemLines: string[] = [
-      'Sei CopilotRM, un assistente AI per la gestione clienti di un negozio di elettronica e telecomunicazioni.',
-    ];
-    if (mainChar) {
-      systemLines.push(`Il tuo ruolo: ${mainChar.role}.`);
-      if (mainChar.tone?.length) systemLines.push(`Tono: ${mainChar.tone.join(', ')}.`);
-      if (mainChar.goals?.length) systemLines.push(`Obiettivi: ${mainChar.goals.join('; ')}.`);
-      if (mainChar.limits?.length) systemLines.push(`Limiti: ${mainChar.limits.join('; ')}.`);
-    }
-    systemLines.push("Rispondi sempre in italiano, in modo conciso e orientato all'azione.");
-    if (customer) {
-      systemLines.push(`Stai assistendo con il cliente: ${customer.fullName}.`);
-      if (customer.segments?.length) systemLines.push(`Segmenti cliente: ${customer.segments.join(', ')}.`);
-      if (customer.interests?.length) systemLines.push(`Interessi: ${customer.interests.join(', ')}.`);
-    }
-
-    // Se la discussion ha prodotto contributi, includili come contesto
-    const discussionContext = discussionResult?.messages.length
-      ? `\nContributi dei tuoi agenti specialistici:\n${discussionResult.messages.map((m) => `- ${m.agent}: ${m.content}`).join('\n')}\n\nSintesi: ${discussionResult.synthesis ?? 'nessuna'}`
-      : '';
-
-    // Registra swarm run nella swarm runtime per Swarm Studio
+    // ── Registra nella SwarmRuntime per Swarm Studio ─────────────────────────
     const chatEvent: DomainEvent = {
       id: makeId('evt'),
       type: 'chat.message',
       occurredAt: new Date().toISOString(),
-      payload: { message: message.slice(0, 100), customerId: customerId ?? null },
+      payload: { message: message.slice(0, 100), customerId: customer?.id ?? null },
     };
     const chatCtx = {
       event: chatEvent,
@@ -2043,55 +2308,38 @@ export function buildServer(state = buildState()) {
     try {
       const { runId } = await state.orchestrator.runSwarm(chatCtx, state.swarmRuntime);
       swarmRunId = runId;
-      // Aggiungi messaggi della discussion come swarm messages per la Swarm Studio
-      if (discussionResult?.messages.length) {
-        for (const dm of discussionResult.messages) {
-          state.swarmRuntime.addMessage({
-            id: makeId('msg'),
-            runId,
-            stepNo: 99,
-            fromAgent: dm.agent,
-            kind: 'observation',
-            content: dm.content,
-            createdAt: new Date().toISOString(),
-          });
-        }
-        if (discussionResult.synthesis) {
-          state.swarmRuntime.addMessage({
-            id: makeId('msg'),
-            runId,
-            stepNo: 100,
-            fromAgent: 'Moderatore',
-            kind: 'decision',
-            content: discussionResult.synthesis,
-            createdAt: new Date().toISOString(),
-          });
-        }
+      for (const tm of swarmThread) {
+        const kindMap: Record<ChatSwarmMsg['kind'], 'observation' | 'proposal' | 'handoff' | 'decision' | 'error'> = {
+          brief: 'observation', analysis: 'proposal', critique: 'observation', defense: 'proposal', synthesis: 'decision',
+        };
+        state.swarmRuntime.addMessage({
+          id: makeId('msg'),
+          runId,
+          stepNo: tm.round * 10,
+          fromAgent: tm.agent,
+          toAgent: tm.mentions[0],
+          kind: kindMap[tm.kind],
+          content: tm.content,
+          createdAt: new Date().toISOString(),
+        });
       }
       void broadcastSwarmDebug(state, runId, 'chat.message', 0, 0);
     } catch { /* non-blocking */ }
 
-    try {
-      const res = await state.llm.chat(
-        [
-          { role: 'system', content: systemLines.join(' ') },
-          { role: 'user', content: `${message}${discussionContext}` },
-        ],
-        { maxTokens: 512, temperature: 0.7 }
-      );
-      state.audit.write(makeAuditRecord('chat', 'chat.response', { customerId: customerId ?? null, provider: res.provider, swarmRunId }));
-      return {
-        reply: res.content,
-        provider: res.provider,
-        model: res.model,
-        swarmRunId,
-        discussion: discussionResult ? { messages: discussionResult.messages, synthesis: discussionResult.synthesis } : null,
-        sessionId: req.body.sessionId,
-      };
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      return { reply: `Errore LLM: ${msg}`, provider: 'error', swarmRunId, discussion: null, sessionId: req.body.sessionId };
-    }
+    state.audit.write(makeAuditRecord('chat', 'chat.response', {
+      customerId: customer?.id ?? null,
+      swarmRunId,
+      agentsInvolved: [...new Set(swarmThread.map((m) => m.agent))],
+    }));
+
+    return {
+      reply: synthesis,
+      swarmThread,
+      swarmRunId,
+      provider: 'swarm',
+      sessionId: req.body.sessionId,
+      customer: customer ? { id: customer.id, fullName: customer.fullName, segments: customer.segments } : null,
+    };
   });
 
   // ─── NLP Intake: testo libero → dati strutturati ────────────────────────────

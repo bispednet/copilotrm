@@ -15,8 +15,39 @@ type ConsultResult = {
   scripts: { whatsapp: Record<string, string>; call: Record<string, string> };
   ragHints: Array<{ docId: string; text: string; score: number }>;
 };
-type ChatMessage = { role: 'user' | 'assistant'; content: string };
+type SwarmThreadMsg = {
+  agent: string;
+  agentRole: string;
+  content: string;
+  kind: 'brief' | 'analysis' | 'critique' | 'defense' | 'synthesis';
+  mentions: string[];
+  round: number;
+};
+type ChatMessage =
+  | { role: 'user'; content: string }
+  | { role: 'assistant'; content: string; swarmThread?: SwarmThreadMsg[]; swarmRunId?: string | null; customerFound?: { id: string; fullName: string; segments: string[] } | null };
 type Toast = { id: number; kind: 'ok' | 'err'; msg: string };
+
+// Agent color palette for the swarm thread UI
+const AGENT_COLORS: Record<string, { bg: string; border: string; icon: string }> = {
+  Orchestratore: { bg: '#1e40af22', border: '#3b82f6', icon: '🎯' },
+  Assistenza:    { bg: '#065f4622', border: '#10b981', icon: '🔧' },
+  Commerciale:   { bg: '#78350f22', border: '#f59e0b', icon: '💼' },
+  Hardware:      { bg: '#4c1d9522', border: '#8b5cf6', icon: '🖥️' },
+  Telefonia:     { bg: '#1e3a5f22', border: '#6366f1', icon: '📡' },
+  CustomerCare:  { bg: '#831843'  + '22', border: '#ec4899', icon: '🤝' },
+  Critico:       { bg: '#7f1d1d22', border: '#ef4444', icon: '⚡' },
+  Moderatore:    { bg: '#14532d22', border: '#22c55e', icon: '🔍' },
+};
+const DEFAULT_COLOR = { bg: '#1f293722', border: '#94a3b8', icon: '🤖' };
+
+const KIND_LABEL: Record<SwarmThreadMsg['kind'], string> = {
+  brief:     'Brief',
+  analysis:  'Analisi',
+  critique:  'Critica',
+  defense:   'Difesa',
+  synthesis: 'Sintesi',
+};
 
 // ── API helper ───────────────────────────────────────────────────────────────
 
@@ -56,6 +87,7 @@ function App() {
   const [chatInput, setChatInput] = useState('');
   const [chatCustomerId, setChatCustomerId] = useState('');
   const [chatBusy, setChatBusy] = useState(false);
+  const [expandedThreads, setExpandedThreads] = useState<Set<number>>(new Set());
   const chatBoxRef = useRef<HTMLDivElement>(null);
 
   // ── Theme ───────────────────────────────────────────────────────────────────
@@ -124,6 +156,7 @@ function App() {
     const msg = chatInput.trim();
     if (!msg || chatBusy) return;
     setChatInput('');
+    const userMsgIndex = chatHistory.length;
     setChatHistory((prev) => [...prev, { role: 'user', content: msg }]);
     setChatBusy(true);
     try {
@@ -132,14 +165,31 @@ function App() {
         body: JSON.stringify({ message: msg, customerId: chatCustomerId || undefined }),
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const data = await res.json() as { reply: string; provider?: string };
-      setChatHistory((prev) => [...prev, { role: 'assistant', content: data.reply }]);
+      const data = await res.json() as {
+        reply: string;
+        swarmThread?: SwarmThreadMsg[];
+        swarmRunId?: string | null;
+        provider?: string;
+        customer?: { id: string; fullName: string; segments: string[] } | null;
+      };
+      const assistantIndex = userMsgIndex + 1;
+      setChatHistory((prev) => [...prev, {
+        role: 'assistant',
+        content: data.reply,
+        swarmThread: data.swarmThread ?? [],
+        swarmRunId: data.swarmRunId ?? null,
+        customerFound: data.customer ?? null,
+      }]);
+      // Auto-espandi il thread dell'ultima risposta
+      if (data.swarmThread?.length) {
+        setExpandedThreads((prev) => new Set([...prev, assistantIndex]));
+      }
     } catch (err) {
       setChatHistory((prev) => [...prev, { role: 'assistant', content: `Errore: ${err instanceof Error ? err.message : String(err)}` }]);
     } finally {
       setChatBusy(false);
     }
-  }, [chatInput, chatBusy, chatCustomerId]);
+  }, [chatInput, chatBusy, chatCustomerId, chatHistory.length]);
 
   // ── Nav ──────────────────────────────────────────────────────────────────────
   const navItems: Array<{ key: Page; label: string; icon: string }> = [
@@ -437,54 +487,178 @@ function App() {
 
           {/* ── CHAT ──────────────────────────────────────────────── */}
           {page === 'chat' && (
-            <article className="card">
+            <article className="card" style={{ maxWidth: 860, margin: '0 auto' }}>
               <h2>Chat con CopilotRM</h2>
               <p className="muted" style={{ fontSize: 13, marginBottom: 10 }}>
-                Parla con l'AI copilot in italiano. Contestualizza con un cliente per risposte più precise.
+                Ogni messaggio avvia una discussione multi-agente. Il team analizza, si sfida, e produce una risposta coordinata.
               </p>
 
-              <label>Contesto cliente (opzionale)</label>
-              <select value={chatCustomerId} onChange={(e) => setChatCustomerId(e.target.value)}>
+              <label>Contesto cliente (opzionale — o scrivi il nome nel messaggio)</label>
+              <select value={chatCustomerId} onChange={(e) => setChatCustomerId(e.target.value)} style={{ marginBottom: 12 }}>
                 <option value="">Nessun cliente selezionato</option>
                 {customers.map((c) => (
                   <option key={c.id} value={c.id}>{c.fullName} · {c.segments[0]}</option>
                 ))}
               </select>
 
-              <div className="chatBox" ref={chatBoxRef} style={{ marginTop: 12 }}>
+              <div className="chatBox" ref={chatBoxRef} style={{ marginTop: 0, minHeight: 320 }}>
                 {chatHistory.length === 0 && (
-                  <div style={{ margin: 'auto', textAlign: 'center', color: 'var(--muted)', fontSize: 13 }}>
-                    <p>Ciao! Sono CopilotRM.</p>
-                    <p>Chiedimi consigli su clienti, offerte o campagne.</p>
+                  <div style={{ margin: 'auto', textAlign: 'center', color: 'var(--muted)', fontSize: 13, padding: '40px 20px' }}>
+                    <div style={{ fontSize: 32, marginBottom: 8 }}>🤖</div>
+                    <p style={{ fontWeight: 600 }}>Team CopilotRM pronto.</p>
+                    <p>Ogni tua domanda viene analizzata da un team di agenti specialistici:<br />
+                      <span style={{ color: '#3b82f6' }}>Orchestratore</span> · <span style={{ color: '#10b981' }}>Assistenza</span> · <span style={{ color: '#f59e0b' }}>Commerciale</span> · <span style={{ color: '#8b5cf6' }}>Hardware</span> · <span style={{ color: '#ef4444' }}>Critico</span> · <span style={{ color: '#22c55e' }}>Moderatore</span>
+                    </p>
                   </div>
                 )}
-                {chatHistory.map((m, i) => (
-                  <div key={i} className={`chatBubble ${m.role}`}>{m.content}</div>
-                ))}
+
+                {chatHistory.map((m, i) => {
+                  if (m.role === 'user') {
+                    return (
+                      <div key={i} className="chatBubble user">{m.content}</div>
+                    );
+                  }
+
+                  // Assistant message: reply + swarm thread
+                  const hasThread = m.role === 'assistant' && (m.swarmThread?.length ?? 0) > 0;
+                  const threadOpen = expandedThreads.has(i);
+
+                  return (
+                    <div key={i} style={{ marginBottom: 16 }}>
+                      {/* Customer found indicator */}
+                      {m.role === 'assistant' && m.customerFound && (
+                        <div style={{ fontSize: 11, color: 'var(--muted)', marginBottom: 4, paddingLeft: 4 }}>
+                          👤 Contesto cliente: <strong>{m.customerFound.fullName}</strong> ({m.customerFound.segments.join(', ')})
+                        </div>
+                      )}
+
+                      {/* Swarm thread toggle */}
+                      {hasThread && (
+                        <div
+                          style={{ marginBottom: 6, cursor: 'pointer', userSelect: 'none' }}
+                          onClick={() => setExpandedThreads((prev) => {
+                            const next = new Set(prev);
+                            if (next.has(i)) next.delete(i); else next.add(i);
+                            return next;
+                          })}
+                        >
+                          <span style={{ fontSize: 12, color: 'var(--muted)', display: 'flex', alignItems: 'center', gap: 6 }}>
+                            <span style={{ fontSize: 14 }}>{threadOpen ? '▾' : '▸'}</span>
+                            <span>Discussione agenti ({m.role === 'assistant' && m.swarmThread?.length} messaggi)</span>
+                            {m.role === 'assistant' && m.swarmRunId && (
+                              <code style={{ fontSize: 10 }}>#{m.swarmRunId.slice(-6)}</code>
+                            )}
+                          </span>
+                        </div>
+                      )}
+
+                      {/* Swarm thread panel */}
+                      {hasThread && threadOpen && m.role === 'assistant' && (
+                        <div style={{
+                          border: '1px solid var(--border)',
+                          borderRadius: 10,
+                          padding: '12px 14px',
+                          marginBottom: 8,
+                          background: 'var(--surface-alt)',
+                          display: 'flex',
+                          flexDirection: 'column',
+                          gap: 10,
+                        }}>
+                          {m.swarmThread!.map((tm, ti) => {
+                            const col = AGENT_COLORS[tm.agent] ?? DEFAULT_COLOR;
+                            // Highlight @mentions in content
+                            const contentWithMentions = tm.content.replace(
+                              /@([A-Za-z]+)/g,
+                              '<span style="color:#f59e0b;font-weight:700">@$1</span>'
+                            );
+                            return (
+                              <div key={ti} style={{
+                                background: col.bg,
+                                border: `1.5px solid ${col.border}`,
+                                borderRadius: 8,
+                                padding: '8px 12px',
+                              }}>
+                                <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
+                                  <span style={{ fontSize: 16 }}>{col.icon}</span>
+                                  <span style={{ fontWeight: 700, fontSize: 13, color: col.border }}>{tm.agent}</span>
+                                  <span style={{ fontSize: 11, color: 'var(--muted)' }}>{tm.agentRole}</span>
+                                  <span style={{ marginLeft: 'auto', fontSize: 10, background: col.border + '33', color: col.border, borderRadius: 4, padding: '1px 6px', fontWeight: 600 }}>
+                                    {KIND_LABEL[tm.kind]}
+                                  </span>
+                                </div>
+                                {/* eslint-disable-next-line react/no-danger */}
+                                <div style={{ fontSize: 13, lineHeight: 1.5 }} dangerouslySetInnerHTML={{ __html: contentWithMentions }} />
+                                {tm.mentions.length > 0 && (
+                                  <div style={{ marginTop: 4, fontSize: 11, color: 'var(--muted)' }}>
+                                    → {tm.mentions.map((mn) => `@${mn}`).join(' ')}
+                                  </div>
+                                )}
+                              </div>
+                            );
+                          })}
+                        </div>
+                      )}
+
+                      {/* Final reply bubble */}
+                      <div className="chatBubble assistant" style={{
+                        borderLeft: '3px solid #22c55e',
+                        paddingLeft: 12,
+                      }}>
+                        {m.content}
+                      </div>
+                    </div>
+                  );
+                })}
+
                 {chatBusy && (
-                  <div className="chatBubble assistant typing">CopilotRM sta scrivendo…</div>
+                  <div style={{ padding: '12px 0' }}>
+                    <div style={{ fontSize: 12, color: 'var(--muted)', marginBottom: 6 }}>
+                      🎯 Orchestratore sta analizzando la richiesta…
+                    </div>
+                    <div className="chatBubble assistant typing">Il team è in discussione…</div>
+                  </div>
                 )}
               </div>
 
-              <div className="chatInputRow">
+              <div className="chatInputRow" style={{ marginTop: 8 }}>
                 <textarea
-                  placeholder="Scrivi un messaggio…"
+                  placeholder="Scrivi un messaggio… (Es: 'Mario Rossi vuole giocare a Fortnite, cosa proponiamo?')"
                   value={chatInput}
                   onChange={(e) => setChatInput(e.target.value)}
                   onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); void sendChat(); } }}
+                  rows={2}
                 />
                 <button onClick={() => void sendChat()} disabled={chatBusy || !chatInput.trim()}>
                   Invia
                 </button>
               </div>
+
               {chatHistory.length > 0 && (
-                <button
-                  className="ghost"
-                  style={{ marginTop: 4, fontSize: 12, padding: '6px 10px' }}
-                  onClick={() => setChatHistory([])}
-                >
-                  Svuota chat
-                </button>
+                <div style={{ display: 'flex', gap: 8, marginTop: 6, alignItems: 'center' }}>
+                  <button
+                    className="ghost"
+                    style={{ fontSize: 12, padding: '4px 10px' }}
+                    onClick={() => { setChatHistory([]); setExpandedThreads(new Set()); }}
+                  >
+                    Svuota chat
+                  </button>
+                  <button
+                    className="ghost"
+                    style={{ fontSize: 12, padding: '4px 10px' }}
+                    onClick={() => {
+                      const allIdx = chatHistory.reduce((acc, m, i) => {
+                        if (m.role === 'assistant' && (m as Extract<ChatMessage, {role:'assistant'}>).swarmThread?.length) acc.push(i);
+                        return acc;
+                      }, [] as number[]);
+                      const allOpen = allIdx.every((i) => expandedThreads.has(i));
+                      setExpandedThreads(allOpen ? new Set() : new Set(allIdx));
+                    }}
+                  >
+                    {chatHistory.some((m, i) => m.role === 'assistant' && (m as Extract<ChatMessage, {role:'assistant'}>).swarmThread?.length && !expandedThreads.has(i))
+                      ? 'Espandi tutti i thread'
+                      : 'Comprimi tutti i thread'}
+                  </button>
+                </div>
               )}
             </article>
           )}
