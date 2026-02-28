@@ -4,6 +4,6 @@
   "private": true,
   "type": "module",
   "scripts": {"build":"tsc -p tsconfig.json","dev":"tsx watch src/index.ts","lint":"echo 'lint'","test":"echo 'test'"},
-  "dependencies": {"@bisp/integrations-eliza":"workspace:*","@bisp/integrations-media":"workspace:*","@bisp/shared-db":"workspace:*","@bisp/shared-logger":"workspace:*","bullmq":"^5.16.0","ioredis":"^5.4.1"},
+  "dependencies": {"@bisp/integrations-ean":"workspace:*","@bisp/integrations-eliza":"workspace:*","@bisp/integrations-llm":"workspace:*","@bisp/integrations-media":"workspace:*","@bisp/integrations-rss":"workspace:*","@bisp/integrations-wordpress":"workspace:*","@bisp/shared-config":"workspace:*","@bisp/shared-db":"workspace:*","@bisp/shared-logger":"workspace:*","@bisp/shared-types":"workspace:*","@bisp/agent-bus":"workspace:*","bullmq":"^5.16.0","ioredis":"^5.4.1"},
   "devDependencies": {"tsx":"^4.19.2","typescript":"^5.6.3","@types/node":"^22.9.0"}
 }

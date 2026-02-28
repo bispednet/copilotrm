@@ -9,6 +9,10 @@ import { loadConfig } from '@bisp/shared-config';
 import { PgRuntime } from '@bisp/shared-db';
 import { logger } from '@bisp/shared-logger';
 import type { RssIngestedEvent } from '@bisp/integrations-rss';
+import { EanLookupClient } from '@bisp/integrations-ean';
+import type { ContentCard, DaneaInvoiceLine } from '@bisp/shared-types';
+
+const ean = new EanLookupClient();
 
 const redisUrl = process.env.REDIS_URL ?? 'redis://localhost:6379';
 const queueMode = /^(redis|bullmq)$/i.test(process.env.BISPCRM_QUEUE_MODE ?? 'inline') ? 'redis' : 'inline';
@@ -144,6 +148,132 @@ async function runContentPipeline(item: RssIngestedEvent['payload']): Promise<{ 
   }
 }
 
+/**
+ * Pipeline fattura Danea → ContentCard:
+ * 1. EAN enrichment per ogni riga (marca, immagine, descrizione prodotto)
+ * 2. Genera hook + varianti social (telegram, facebook, instagram) per ogni prodotto
+ * 3. Genera articolo blog HTML via LLM + AgentDiscussion (se configurato)
+ * 4. Pubblica su WordPress come draft (se configurato)
+ * 5. Ritorna ContentCard[] — ogni riga invoice → 1 card
+ */
+async function runInvoiceContentPipeline(payload: {
+  invoiceId: string;
+  lines: DaneaInvoiceLine[];
+}): Promise<{ cards: ContentCard[]; wpPostIds: number[] }> {
+  const cards: ContentCard[] = [];
+  const wpPostIds: number[] = [];
+
+  for (const line of payload.lines) {
+    // 1. EAN enrichment
+    let enrichedTitle = line.description;
+    let enrichedDesc = line.description;
+    let imageUrl = line.imageUrl;
+    let brand = line.brand;
+
+    if (line.ean || line.barcode) {
+      const code = line.ean ?? line.barcode ?? '';
+      const info = await ean.lookup(code);
+      if (info) {
+        enrichedTitle = info.title || enrichedTitle;
+        enrichedDesc = info.description || enrichedDesc;
+        imageUrl = info.imageUrl ?? imageUrl;
+        brand = info.brand ?? brand;
+      }
+    }
+
+    const priceStr = `€${line.unitCost.toFixed(2)}`;
+    const hook = brand
+      ? `Nuovo stock: ${brand} ${enrichedTitle} a partire da ${priceStr}. Disponibile da noi.`
+      : `Nuovo arrivo in magazzino: ${enrichedTitle} a partire da ${priceStr}.`;
+
+    // 2. Varianti social semplici (template)
+    const telegramDraft = `📦 ${hook}${imageUrl ? `\n🖼 ${imageUrl}` : ''}\n\nScrivici per info o disponibilità.`;
+    const facebookDraft = `✅ ${hook}\n\nVieni a trovarci o contattaci per configurazioni e bundle personalizzati! 👇`;
+    const instagramDraft = `🔥 ${enrichedTitle}${brand ? ` by ${brand}` : ''} — ${priceStr}\n\nNuovo stock disponibile! Contattaci per info ➡️ link in bio\n\n#tech #hardware #${brand?.toLowerCase().replace(/\s+/g, '') ?? 'electronics'} #newstock`;
+
+    // 3. Blog draft via LLM + discussione (se disponibile)
+    let blogDraft = `<h2>${enrichedTitle}</h2>\n<p>${enrichedDesc}</p>\n${imageUrl ? `<img src="${imageUrl}" alt="${enrichedTitle}" />` : ''}\n<p>Prezzo a partire da: <strong>${priceStr}</strong></p>\n<p>Disponibile presso il nostro negozio. <a href="/contatti">Contattaci</a> per disponibilità e bundle.</p>`;
+
+    if (discussion) {
+      try {
+        const topic = `Scheda commerciale per: ${enrichedTitle}`;
+        const context = `Prodotto: ${enrichedTitle}. ${brand ? `Marca: ${brand}.` : ''} Descrizione: ${enrichedDesc}. Prezzo: ${priceStr}. Qty: ${line.qty}.`;
+        const result = await discussion.discuss({ topic, context, agents: CONTENT_AGENTS, rounds: 1 });
+        if (result.synthesis && discussion) {
+          const llmCfg = loadConfig();
+          const llm = createLLMClient(llmCfg.llm);
+          const resp = await llm.chat(
+            [
+              { role: 'system', content: 'Sei un content writer specializzato in tech. Scrivi schede commerciali in italiano per un blog aziendale.' },
+              {
+                role: 'user',
+                content: [
+                  `Scrivi una scheda commerciale/articolo blog per questo prodotto.`,
+                  ``,
+                  `Prodotto: ${enrichedTitle}`,
+                  brand ? `Marca: ${brand}` : '',
+                  `Descrizione: ${enrichedDesc}`,
+                  `Prezzo a partire da: ${priceStr}`,
+                  ``,
+                  `Note editoriali: ${result.synthesis}`,
+                  ``,
+                  `Formato: HTML (h2, p tags). Max 300 parole. Includi titolo SEO, 2 sezioni, e CTA finale.`,
+                  `Restituisci SOLO l'HTML.`,
+                ].filter(Boolean).join('\n'),
+              },
+            ],
+            { tier: 'small', maxTokens: 600 }
+          );
+          if (resp.content.trim()) blogDraft = resp.content.trim();
+        }
+      } catch (err) {
+        logger.warn('worker-content: invoice blog generation fallita, uso template', { error: String(err) });
+      }
+    }
+
+    const card: ContentCard = {
+      id: `cc_${Math.random().toString(36).slice(2, 10)}`,
+      source: 'invoice',
+      sourceRef: payload.invoiceId,
+      title: enrichedTitle,
+      hook,
+      blogDraft,
+      telegramDraft,
+      facebookDraft,
+      instagramDraft,
+      approvalStatus: 'pending',
+      createdAt: new Date().toISOString(),
+    };
+    cards.push(card);
+
+    // 4. Pubblica su WordPress come draft
+    if (wp) {
+      try {
+        const titleMatch = blogDraft.match(/<h[12][^>]*>(.*?)<\/h[12]>/s);
+        const postTitle = titleMatch ? titleMatch[1].replace(/<[^>]+>/g, '') : enrichedTitle;
+        const result = await wp.createPost({
+          title: postTitle,
+          content: blogDraft,
+          excerpt: hook,
+          status: 'draft',
+          slug: `stock-${enrichedTitle.toLowerCase().replace(/[^a-z0-9]+/g, '-').slice(0, 50)}-${Date.now().toString(36)}`,
+        });
+        wpPostIds.push(result.id);
+        logger.info('worker-content: ContentCard WordPress draft creato', { postId: result.id, title: enrichedTitle });
+      } catch (err) {
+        logger.warn('worker-content: WordPress publish ContentCard fallita', { error: String(err) });
+      }
+    }
+  }
+
+  logger.info('worker-content: invoice pipeline completata', {
+    invoiceId: payload.invoiceId,
+    cards: cards.length,
+    wpPosts: wpPostIds.length,
+  });
+  return { cards, wpPostIds };
+}
+
 if (queueMode !== 'redis') {
   logger.info('worker-content idle (queue mode inline)', { queueMode });
   setInterval(() => undefined, 60 * 60 * 1000);
@@ -165,6 +295,13 @@ if (queueMode !== 'redis') {
         const event = job.data as RssIngestedEvent;
         const result = await runContentPipeline(event.payload);
         return result;
+      }
+
+      // Pipeline fattura Danea → EAN enrich → ContentCard → social variants → WordPress
+      if (job.name === 'danea.invoice.ingested') {
+        const event = job.data as { payload: { invoiceId: string; lines: DaneaInvoiceLine[] } };
+        const result = await runInvoiceContentPipeline(event.payload);
+        return { ok: true, cards: result.cards.length, wpPosts: result.wpPostIds.length };
       }
 
       // Jobs generici: RAG search hints

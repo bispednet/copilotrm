@@ -141,6 +141,10 @@ export interface DaneaInvoiceLine {
   qty: number;
   unitCost: number;
   tags?: string[];
+  ean?: string;       // EAN-13 / GTIN code
+  barcode?: string;   // altri formati (UPC-A, Code128, ecc.)
+  brand?: string;     // marca (enricchita via EAN lookup)
+  imageUrl?: string;  // URL immagine prodotto (da EAN lookup o Icecat)
 }
 
 export interface DomainEvent<T = Record<string, unknown>> {
@@ -316,5 +320,30 @@ export interface SwarmHandoff {
   blocking: boolean;
   requiresApproval: boolean;
   status: 'pending' | 'executed' | 'skipped';
+  createdAt: string;
+}
+
+/** ContentCard — scheda multimediale generata dalla content factory */
+export interface ContentCard {
+  id: string;
+  /** fonte originale dell'evento scatenante */
+  source: 'invoice' | 'promo' | 'rss' | 'manual';
+  /** riferimento all'entità sorgente (invoiceId, promoId, rssItemId...) */
+  sourceRef: string;
+  offerId?: string;
+  title: string;
+  /** hook di 1-2 frasi per social */
+  hook: string;
+  blogDraft?: string;         // HTML completo
+  facebookDraft?: string;
+  instagramDraft?: string;
+  xDraft?: string;
+  telegramDraft?: string;
+  avatarScript?: string;      // script per avatar video
+  podcastOutline?: string;    // outline per podcast multi-agent
+  mediaJobIds?: string[];     // job IDs media pipeline
+  approvalStatus: 'pending' | 'approved' | 'rejected';
+  approvedBy?: string;
+  approvedAt?: string;
   createdAt: string;
 }

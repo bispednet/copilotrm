@@ -1205,6 +1205,18 @@ export function buildServer(state = buildState()) {
     state.objectives.upsert(merged);
     state.audit.write(makeAuditRecord('manager', 'objective.updated', { objectiveId: merged.id, patch: req.body }));
     void state.postgresMirror.saveObjective(merged);
+    // Propaga come DomainEvent → orchestrator notifica content + preventivi
+    const objEvent: DomainEvent = {
+      id: makeId('evt'),
+      type: 'manager.objective.updated',
+      occurredAt: new Date().toISOString(),
+      payload: { objectiveId: merged.id, name: merged.name, active: merged.active },
+    };
+    const objCtx = { event: objEvent, activeObjectives: state.objectives.listActive(), activeOffers: state.offers.listActive(), now: new Date().toISOString() };
+    void state.orchestrator.runSwarm(objCtx, state.swarmRuntime).then(({ output, runId }) => {
+      persistOperationalOutput(state, output);
+      void broadcastSwarmDebug(state, runId, objEvent.type, output.tasks.length, output.drafts.length);
+    }).catch(() => undefined);
     return merged;
   });
   app.post<{ Params: { objectiveId: string }; Body: { active: boolean } }>('/api/manager/objectives/:objectiveId/activate', async (req, reply) => {

@@ -132,5 +132,33 @@ export function deriveRuleCandidates(event: DomainEvent, offers: ProductOffer[])
     }
   }
 
+  if (event.type === 'manager.objective.updated') {
+    const payload = event.payload as Record<string, unknown>;
+    const objectiveId = String(payload.objectiveId ?? '');
+    const objectiveName = String(payload.name ?? 'obiettivo aggiornato');
+    // Notifica content team: rivedeere priorità editoriali
+    candidates.push({
+      id: id('act'),
+      agent: 'content',
+      actionType: 'content',
+      title: `Rivedi priorità content per obiettivo: ${objectiveName}`,
+      channel: 'telegram',
+      confidence: 0.78,
+      needsApproval: false,
+      metadata: { trigger: 'objective-updated', objectiveId, contextFit: 0.8, profileFit: 0.5 },
+    });
+    // Notifica preventivi: riallineare offerte alle nuove priorità
+    candidates.push({
+      id: id('act'),
+      agent: 'preventivi',
+      actionType: 'quote',
+      title: `Riallinea offerte prioritarie per: ${objectiveName}`,
+      channel: 'telegram',
+      confidence: 0.71,
+      needsApproval: false,
+      metadata: { trigger: 'objective-updated', objectiveId, contextFit: 0.75, profileFit: 0.5 },
+    });
+  }
+
   return candidates;
 }

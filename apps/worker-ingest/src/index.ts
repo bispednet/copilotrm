@@ -8,7 +8,10 @@ const redisUrl = process.env.REDIS_URL ?? 'redis://localhost:6379';
 const queueMode = /^(redis|bullmq)$/i.test(process.env.BISPCRM_QUEUE_MODE ?? 'inline') ? 'redis' : 'inline';
 const danea = new DaneaReadOnlyStub();
 
-/** Feed RSS da env var RSS_FEEDS (JSON array) o defaults tech/telecom italiani */
+/**
+ * Feed RSS da env var RSS_FEEDS (JSON array di RssSource) o defaults curati.
+ * Formato env: RSS_FEEDS='[{"url":"...","name":"...","category":"..."}]'
+ */
 function getRssSources(): RssSource[] {
   const raw = process.env.RSS_FEEDS;
   if (raw) {
@@ -18,10 +21,34 @@ function getRssSources(): RssSource[] {
       logger.warn('worker-ingest: RSS_FEEDS env non è JSON valido, uso defaults');
     }
   }
+  // Defaults curati: hardware, smartphone, TLC, energia, tech — IT + internazionali
   return [
-    { url: 'https://www.hwupgrade.it/rss/news.xml', name: 'HWUpgrade', category: 'tech' },
-    { url: 'https://www.tomshw.it/feed', name: 'TomsHW', category: 'tech' },
-    { url: 'https://www.mondomobileweb.it/feed/', name: 'MondoMobileWeb', category: 'mobile' },
+    // ── IT hardware & tech ──────────────────────────────────────────────────
+    { url: 'https://www.hwupgrade.it/rss/news.xml',              name: 'HWUpgrade',        category: 'hardware'   },
+    { url: 'https://www.tomshw.it/feed',                          name: 'TomsHW_IT',        category: 'hardware'   },
+    { url: 'https://www.punto-informatico.it/feed/',              name: 'PuntoInformatico', category: 'tech'       },
+    { url: 'https://www.wired.it/feed/rss',                       name: 'WiredIT',          category: 'tech'       },
+    { url: 'https://www.ilsoftware.it/feed',                      name: 'IlSoftware',       category: 'software'   },
+    { url: 'https://www.bitmat.it/feed/',                         name: 'BitMat',           category: 'enterprise' },
+    // ── IT smartphone & mobile ──────────────────────────────────────────────
+    { url: 'https://www.hdblog.it/feed/',                         name: 'HDBlog',           category: 'smartphone' },
+    { url: 'https://www.smartworld.it/feed',                      name: 'SmartWorld',       category: 'smartphone' },
+    { url: 'https://www.mondomobileweb.it/feed/',                 name: 'MondoMobileWeb',   category: 'mobile'     },
+    // ── IT TLC & connectivity ───────────────────────────────────────────────
+    { url: 'https://www.key4biz.it/feed/',                        name: 'Key4Biz',          category: 'tlc'        },
+    { url: 'https://corrierecomunicazioni.it/feed/',              name: 'CorriereComu',     category: 'tlc'        },
+    // ── IT energia ──────────────────────────────────────────────────────────
+    { url: 'https://www.qualenergia.it/feed/',                    name: 'QualEnergia',      category: 'energy'     },
+    // ── Internazionale hardware ──────────────────────────────────────────────
+    { url: 'https://arstechnica.com/feed/',                       name: 'ArsTechnica',      category: 'tech'       },
+    { url: 'https://www.theverge.com/rss/index.xml',              name: 'TheVerge',         category: 'tech'       },
+    { url: 'https://www.techradar.com/rss',                       name: 'TechRadar',        category: 'tech'       },
+    { url: 'https://www.zdnet.com/news/rss.xml',                  name: 'ZDNet',            category: 'enterprise' },
+    { url: 'https://www.notebookcheck.net/News.13.0.html?feed=1', name: 'NotebookCheck',    category: 'laptop'     },
+    // ── Internazionale smartphone ────────────────────────────────────────────
+    { url: 'https://www.gsmarena.com/rss-news-reviews.php3',      name: 'GSMArena',         category: 'smartphone' },
+    { url: 'https://9to5google.com/feed/',                         name: '9to5Google',       category: 'android'    },
+    { url: 'https://9to5mac.com/feed/',                            name: '9to5Mac',          category: 'apple'      },
   ];
 }
 
@@ -46,7 +73,9 @@ async function main(): Promise<void> {
   const invoices = danea.listRecentInvoices();
   for (const invoice of invoices) {
     const event = danea.toDomainEvent(invoice);
+    // Dual-queue: orchestrator per regole CRM + content per content factory
     await orchestratorQueue.add('danea.invoice.ingested', event, { removeOnComplete: 1000, removeOnFail: 1000 });
+    await contentQueue.add('danea.invoice.ingested', event, { removeOnComplete: 500, removeOnFail: 500 });
   }
   logger.info('worker-ingest danea: enqueued events', { count: invoices.length });
 
