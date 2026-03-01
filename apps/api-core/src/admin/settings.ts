@@ -18,7 +18,7 @@ export interface AdminSettingsState {
 }
 
 const DEFAULT_RUNTIME_SETTINGS_PATH = join(
-  process.env.COPILOTRM_DATA_DIR ?? join(process.cwd(), '..', '..', 'data'),
+  process.env.BISPCRM_RUNTIME_DATA_DIR ?? process.env.COPILOTRM_DATA_DIR ?? join(process.cwd(), '..', '..', 'data'),
   'runtime-admin-settings.json'
 );
 

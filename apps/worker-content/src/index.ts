@@ -14,7 +14,10 @@ import type { ContentCard, DaneaInvoiceLine } from '@bisp/shared-types';
 
 const ean = new EanLookupClient();
 
-const API_CORE_URL = process.env.API_CORE_URL ?? `http://localhost:${process.env.PORT_API_CORE ?? 4010}`;
+const API_CORE_URL =
+  process.env.COPILOTRM_API_URL ??
+  process.env.API_CORE_URL ??
+  `http://localhost:${process.env.PORT_API_CORE ?? 4010}`;
 
 /** Registra una ContentCard nell'api-core per renderla disponibile all'approval UI */
 async function registerCardInApiCore(card: ContentCard): Promise<void> {
@@ -38,9 +41,10 @@ const redisUrl = process.env.REDIS_URL ?? 'redis://localhost:6379';
 const queueMode = /^(redis|bullmq)$/i.test(process.env.BISPCRM_QUEUE_MODE ?? 'inline') ? 'redis' : 'inline';
 const rag = new InMemoryRAGStore();
 const media = new MediaGenerationServiceStub();
+const runtimeCfg = loadConfig();
 const pg =
   /^(postgres|hybrid)$/i.test(process.env.BISPCRM_PERSISTENCE_MODE ?? 'memory')
-    ? new PgRuntime({ connectionString: process.env.DATABASE_URL ?? 'postgres://postgres:postgres@localhost:5432/copilotrm' })
+    ? new PgRuntime({ connectionString: runtimeCfg.dbUrl, migrationsDir: runtimeCfg.migrationsDir })
     : undefined;
 
 rag.add({ id: 'seed:content', text: 'Template content factory per promo hardware, smartphone, fibra, energia.' });

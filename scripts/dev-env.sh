@@ -15,7 +15,13 @@ fi
 : "${BISPCRM_PERSISTENCE_MODE:=postgres}"
 : "${BISPCRM_QUEUE_MODE:=redis}"
 : "${BISPCRM_QUEUE_MEDIA_JOBS:=true}"
+: "${BISPCRM_CHANNEL_DISPATCH_MODE:=gateway-first}"
 : "${REDIS_URL:=redis://localhost:6379}"
+: "${PORT_GATEWAY_CHANNELS:=4020}"
+: "${BISPCRM_ROOT_DIR:=${ROOT_DIR}}"
+: "${BISPCRM_MIGRATIONS_DIR:=${ROOT_DIR}/infra/migrations}"
+: "${BISPCRM_RUNTIME_DATA_DIR:=${ROOT_DIR}/data}"
+: "${BISPCRM_CHANNEL_GATEWAY_URL:=http://localhost:${PORT_GATEWAY_CHANNELS}}"
 # DATABASE_URL deve essere definita in .env — nessun default con credenziali nello script
 if [ -z "${DATABASE_URL:-}" ]; then
   echo "[dev-env] ERROR: DATABASE_URL non definita. Configurala in .env" >&2
@@ -26,6 +32,11 @@ export BISPCRM_AUTH_MODE
 export BISPCRM_PERSISTENCE_MODE
 export BISPCRM_QUEUE_MODE
 export BISPCRM_QUEUE_MEDIA_JOBS
+export BISPCRM_CHANNEL_DISPATCH_MODE
+export BISPCRM_ROOT_DIR
+export BISPCRM_MIGRATIONS_DIR
+export BISPCRM_RUNTIME_DATA_DIR
+export BISPCRM_CHANNEL_GATEWAY_URL
 export REDIS_URL
 export DATABASE_URL
 

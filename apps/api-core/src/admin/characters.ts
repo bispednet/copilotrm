@@ -16,7 +16,7 @@ export interface CharacterProfile extends CopilotRMPersona {
 }
 
 const DEFAULT_CHARACTERS_PATH = join(
-  process.env.COPILOTRM_DATA_DIR ?? join(process.cwd(), '..', '..', 'data'),
+  process.env.BISPCRM_RUNTIME_DATA_DIR ?? process.env.COPILOTRM_DATA_DIR ?? join(process.cwd(), '..', '..', 'data'),
   'runtime-characters.json'
 );
 
@@ -188,4 +188,3 @@ export class CharacterStudioRepository {
     };
   }
 }
-

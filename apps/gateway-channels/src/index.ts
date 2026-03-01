@@ -6,6 +6,7 @@ import { SocialChannelAdapter } from '@bisp/integrations-social';
 import { WhatsAppChannelAdapter } from '@bisp/integrations-whatsapp';
 import { PgRuntime } from '@bisp/shared-db';
 import { isAllowed, resolveAuth } from '@bisp/shared-auth';
+import { loadConfig } from '@bisp/shared-config';
 
 const app = Fastify({ logger: false });
 
@@ -13,11 +14,15 @@ const telegram = new TelegramChannelAdapter();
 const email = new EmailChannelAdapter();
 const social = new SocialChannelAdapter();
 const whatsapp = new WhatsAppChannelAdapter();
-const apiCoreUrl = `http://localhost:${process.env.PORT_API_CORE ?? 4010}`;
+const cfg = loadConfig();
+const apiCoreUrl =
+  process.env.COPILOTRM_API_URL ??
+  process.env.API_CORE_URL ??
+  `http://localhost:${process.env.PORT_API_CORE ?? 4010}`;
 const persistenceEnabled = /^(postgres|hybrid)$/i.test(process.env.BISPCRM_PERSISTENCE_MODE ?? 'memory');
 const authMode = (process.env.BISPCRM_AUTH_MODE ?? 'header') as 'none' | 'header';
 const pg = persistenceEnabled
-  ? new PgRuntime({ connectionString: process.env.DATABASE_URL ?? 'postgres://postgres:postgres@localhost:5432/copilotrm' })
+  ? new PgRuntime({ connectionString: cfg.dbUrl, migrationsDir: cfg.migrationsDir })
   : undefined;
 
 let migrationsReady = false;
@@ -31,6 +36,16 @@ async function ensureMigrations(): Promise<boolean> {
 
 function makeId(prefix: string): string {
   return `${prefix}_${Math.random().toString(36).slice(2, 10)}`;
+}
+
+async function postInboundToApiCore(event: Record<string, unknown>): Promise<void> {
+  const timeoutMs = Number(process.env.BISPCRM_GATEWAY_INBOUND_TIMEOUT_MS ?? 3000);
+  await fetch(`${apiCoreUrl}/api/orchestrate`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-bisp-role': 'system' },
+    body: JSON.stringify({ event }),
+    signal: AbortSignal.timeout(Number.isFinite(timeoutMs) && timeoutMs > 0 ? timeoutMs : 3000),
+  });
 }
 
 async function persistDispatch(record: {
@@ -188,11 +203,7 @@ app.post<{ Body: Record<string, unknown> }>('/api/inbound/telegram', async (req,
     },
   };
   try {
-    await fetch(`${apiCoreUrl}/api/orchestrate`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json', 'x-bisp-role': 'system' },
-      body: JSON.stringify({ event }),
-    });
+    await postInboundToApiCore(event as unknown as Record<string, unknown>);
   } catch { /* best-effort, Telegram expects 200 */ }
   return reply.code(200).send({ ok: true });
 });
@@ -226,11 +237,7 @@ app.post<{ Body: Record<string, unknown> }>('/api/inbound/whatsapp', async (req,
             occurredAt: new Date().toISOString(),
             payload: { channel: 'whatsapp', from, body, subject: '' },
           };
-          await fetch(`${apiCoreUrl}/api/orchestrate`, {
-            method: 'POST',
-            headers: { 'content-type': 'application/json', 'x-bisp-role': 'system' },
-            body: JSON.stringify({ event }),
-          });
+          await postInboundToApiCore(event as unknown as Record<string, unknown>);
         }
       }
     }

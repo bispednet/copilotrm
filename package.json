@@ -8,6 +8,7 @@
     "dev": "turbo run dev --parallel",
     "dev:api": "bash ./scripts/dev-api.sh",
     "dev:start": "bash ./scripts/dev-start.sh",
+    "dev:check": "bash ./scripts/dev-check.sh",
     "infra:up": "bash -lc 'if command -v docker >/dev/null 2>&1; then docker compose -f infra/docker/docker-compose.dev.yml up -d; else echo \"Docker non presente: uso servizi locali (Postgres/Redis)\"; echo \"Verifica porte 5432/6379:\"; (command -v ss >/dev/null 2>&1 && ss -ltn | grep -E \":(5432|6379)\\\\s\" || true); fi'",
     "infra:down": "bash -lc 'if command -v docker >/dev/null 2>&1; then docker compose -f infra/docker/docker-compose.dev.yml down; else echo \"Docker non presente: nessun compose da fermare (servizi locali gestiti dal sistema)\"; fi'",
     "infra:logs": "bash -lc 'if command -v docker >/dev/null 2>&1; then docker compose -f infra/docker/docker-compose.dev.yml logs -f; else echo \"Docker non presente: usa journalctl/systemctl per i servizi locali (postgres/redis)\"; fi'",

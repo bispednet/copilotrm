@@ -46,10 +46,13 @@ pnpm install
 cp .env.example .env   # compilare con i propri valori
 pnpm build
 pnpm dev:start
+pnpm dev:check
 ```
 
 `dev:start` avvia: `api-core` (:4010) · `gateway-channels` (:4020) · `worker-content`
 · `web-crm` (:5173) · `web-assist` (:5174) · `web-manager` (:5175)
+
+`dev:check` verifica health/infra snapshot con timeout e header RBAC.
 
 Se Redis non è attivo su `:6379` lo script fa fallback automatico a `BISPCRM_QUEUE_MODE=inline`.
 
@@ -64,9 +67,16 @@ Vedere `.env.example` per la lista completa.
 |---|---|
 | `DATABASE_URL` | PostgreSQL connection string |
 | `REDIS_URL` | Redis URL |
+| `BISPCRM_ROOT_DIR` | Root runtime progetto (default: cwd) |
+| `BISPCRM_MIGRATIONS_DIR` | Path migrazioni SQL |
+| `BISPCRM_RUNTIME_DATA_DIR` | Directory dati runtime (override di `COPILOTRM_DATA_DIR`) |
 | `LLM_PROVIDER` | Provider LLM primario: `ollama` \| `openai` \| `anthropic` \| `deepseek` |
 | `LLM_FALLBACK_PROVIDER` | Provider cloud di fallback |
 | `OLLAMA_SERVER_URL` | URL server Ollama locale |
+| `BISPCRM_CHANNEL_GATEWAY_URL` | URL gateway-channels per dispatch canali |
+| `API_CORE_URL` | Alias compatibile URL api-core per worker/gateway |
+| `BISPCRM_CHANNEL_DISPATCH_MODE` | `gateway-first` \| `gateway-only` \| `local-only` |
+| `BISPCRM_GATEWAY_INBOUND_TIMEOUT_MS` | Timeout webhook inbound gateway→api-core |
 | `TELEGRAM_BOT_TOKEN` | Token bot Telegram |
 | `SENDGRID_API_KEY` | API key SendGrid per email |
 | `WHATSAPP_API_TOKEN` | Token Meta Cloud API WhatsApp |
@@ -88,6 +98,13 @@ Vedere `.env.example` per la lista completa.
 |---|---|
 | `inline` | Azioni sincrone inline |
 | `redis` | BullMQ via Redis |
+
+### Channel Dispatch
+| Valore | Comportamento |
+|---|---|
+| `gateway-first` (default) | Prova `gateway-channels`, fallback locale se down |
+| `gateway-only` | Usa solo `gateway-channels` (errore se non raggiungibile) |
+| `local-only` | Usa adapter locali in `api-core` |
 
 ### Auth
 | Valore | Comportamento |

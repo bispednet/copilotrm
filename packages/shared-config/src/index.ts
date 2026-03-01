@@ -6,6 +6,11 @@ export interface AppConfig {
   apiPort: number;
   dbUrl: string;
   redisUrl: string;
+  rootDir: string;
+  migrationsDir: string;
+  dataDir: string;
+  channelGatewayUrl: string;
+  channelGatewayTimeoutMs: number;
   /** @deprecated usa llm.primary */
   llmProvider: 'local' | 'api';
   llm: LLMClientConfig;
@@ -25,13 +30,24 @@ export function loadConfig(
     (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env ?? {}
   )
 ): AppConfig {
+  const runtimeProcess = (globalThis as { process?: { cwd?: () => string } }).process;
+  const rootDir = pick(env, 'BISPCRM_ROOT_DIR') ?? runtimeProcess?.cwd?.() ?? '.';
+  const migrationsDir = pick(env, 'BISPCRM_MIGRATIONS_DIR') ?? `${rootDir}/infra/migrations`;
+  const dataDir = pick(env, 'BISPCRM_RUNTIME_DATA_DIR', 'COPILOTRM_DATA_DIR') ?? `${rootDir}/data`;
+  const channelGatewayUrl = pick(env, 'BISPCRM_CHANNEL_GATEWAY_URL') ?? `http://localhost:${env.PORT_GATEWAY_CHANNELS ?? 4020}`;
+  const channelGatewayTimeoutMs = Number(pick(env, 'BISPCRM_CHANNEL_GATEWAY_TIMEOUT_MS') ?? 5000);
   const primary = (pick(env, 'LLM_PROVIDER') ?? 'ollama') as LLMClientConfig['primary'];
   const fallback = pick(env, 'LLM_FALLBACK_PROVIDER') as LLMClientConfig['fallback'] | undefined;
 
   return {
     apiPort: Number(env.PORT_API_CORE ?? 4010),
-    dbUrl: env.DATABASE_URL ?? 'postgres://localhost:5432/copilotrm',
+    dbUrl: env.DATABASE_URL ?? 'postgres://copilotrm:copilotrm_dev_pwd@localhost:5432/copilotrm',
     redisUrl: env.REDIS_URL ?? 'redis://localhost:6379',
+    rootDir,
+    migrationsDir,
+    dataDir,
+    channelGatewayUrl,
+    channelGatewayTimeoutMs: Number.isFinite(channelGatewayTimeoutMs) && channelGatewayTimeoutMs > 0 ? channelGatewayTimeoutMs : 5000,
     llmProvider: primary === 'ollama' ? 'local' : 'api',
     llm: {
       primary,

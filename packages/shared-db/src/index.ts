@@ -13,7 +13,11 @@ export class PgRuntime {
 
   constructor(opts: PgRuntimeOptions) {
     this.pool = new Pool({ connectionString: opts.connectionString });
-    this.migrationsDir = opts.migrationsDir ?? join(process.cwd(), '..', '..', 'infra', 'migrations');
+    const rootDir = process.env.BISPCRM_ROOT_DIR ?? process.cwd();
+    this.migrationsDir =
+      opts.migrationsDir ??
+      process.env.BISPCRM_MIGRATIONS_DIR ??
+      join(rootDir, 'infra', 'migrations');
   }
 
   async health(): Promise<{ ok: boolean; now?: string; error?: string }> {

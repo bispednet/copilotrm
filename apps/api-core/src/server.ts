@@ -94,6 +94,7 @@ export interface ApiState {
 }
 
 export function buildState(seed?: { customers?: CustomerProfile[]; offers?: ProductOffer[]; objectives?: ManagerObjective[] }): ApiState {
+  const cfg = loadConfig();
   const contentCards = new ContentCardRepository();
   const conversations = new ConversationRepository();
   const assistance = new AssistanceRepository();
@@ -110,18 +111,17 @@ export function buildState(seed?: { customers?: CustomerProfile[]; offers?: Prod
   const characterStudio = new CharacterStudioRepository();
   const postgresMirror = new PostgresMirror({
     enabled: /^(postgres|hybrid)$/i.test(process.env.BISPCRM_PERSISTENCE_MODE ?? 'memory'),
-    connectionString: process.env.DATABASE_URL ?? 'postgres://postgres:postgres@localhost:5432/copilotrm',
+    connectionString: cfg.dbUrl,
   });
   const queueGateway = new QueueGateway(
     /^(redis|bullmq)$/i.test(process.env.BISPCRM_QUEUE_MODE ?? 'inline') ? 'redis' : 'inline',
-    process.env.REDIS_URL ?? 'redis://localhost:6379'
+    cfg.redisUrl
   );
 
   // LLM client — local-first con cloud fallback; null se nessun provider configurato
   let llm: LLMClient | null = null;
   try {
-    const appConfig = loadConfig();
-    llm = createLLMClient(appConfig.llm);
+    llm = createLLMClient(cfg.llm);
   } catch {
     // fallback graceful: sistema funziona con template string
   }
@@ -785,6 +785,8 @@ function resolveOfferFromRequest(
 }
 
 function buildChannelDispatchRecord(params: {
+  id?: string;
+  source?: 'api-core' | 'gateway-channels';
   draftId?: string;
   channel: string;
   status: 'queued' | 'sent' | 'failed';
@@ -794,8 +796,8 @@ function buildChannelDispatchRecord(params: {
 }): ChannelDispatchRecord {
   const now = new Date().toISOString();
   return {
-    id: makeId('dispatch'),
-    source: 'api-core',
+    id: params.id ?? makeId('dispatch'),
+    source: params.source ?? 'api-core',
     draftId: params.draftId,
     channel: params.channel,
     status: params.status,
@@ -805,6 +807,113 @@ function buildChannelDispatchRecord(params: {
     createdAt: now,
     sentAt: params.status === 'failed' ? undefined : now,
   };
+}
+
+type DispatchRuntimeResult = {
+  status: 'queued' | 'sent';
+  externalId: string;
+  providerResult: Record<string, unknown>;
+  source: 'api-core' | 'gateway-channels';
+  dispatchId?: string;
+};
+
+function toDispatchStatus(channel: CommunicationDraft['channel'], providerResult: Record<string, unknown>): 'queued' | 'sent' {
+  if (channel === 'telegram') return providerResult.sent === true ? 'sent' : 'queued';
+  if (channel === 'email' || channel === 'whatsapp') return providerResult.status === 'sent' ? 'sent' : 'queued';
+  if (channel === 'facebook' || channel === 'instagram' || channel === 'x') return providerResult.queued === true ? 'queued' : 'sent';
+  return 'queued';
+}
+
+async function dispatchViaLocalAdapters(state: ApiState, draft: CommunicationDraft): Promise<DispatchRuntimeResult> {
+  let externalId = '';
+  let providerResult: Record<string, unknown> = {};
+  if (draft.channel === 'telegram') {
+    const res = await state.channels.telegram.queueOfferMessage(draft);
+    externalId = res.messageId != null ? String(res.messageId) : `telegram_${draft.id}`;
+    providerResult = { queued: res.queued, sent: res.sent, messageId: res.messageId };
+    if (res.error) throw new Error(String(res.error));
+  } else if (draft.channel === 'email') {
+    const res = await state.channels.email.sendOrQueue(draft);
+    externalId = res.messageId ?? `email_${draft.id}`;
+    providerResult = { status: res.status, messageId: res.messageId };
+    if (res.status === 'failed') throw new Error(res.error ?? 'email dispatch failed');
+  } else if (draft.channel === 'whatsapp') {
+    const res = await state.channels.whatsapp.sendOrQueue(draft);
+    externalId = res.messageId ?? `wa_${draft.id}`;
+    providerResult = { status: res.status, messageId: res.messageId };
+    if (res.status === 'failed') throw new Error(res.error ?? 'whatsapp dispatch failed');
+  } else if (['facebook', 'instagram', 'x'].includes(draft.channel)) {
+    const res = await state.channels.social.publish(draft);
+    externalId = `social_${res.platform}_${draft.id}`;
+    providerResult = { queued: res.queued, platform: res.platform };
+    if (!res.queued) throw new Error(`social publish failed on ${res.platform}`);
+  } else {
+    const res = await state.channels.elizaPublishing.publish(draft);
+    externalId = res.externalId;
+    providerResult = { externalId: res.externalId, status: res.status };
+  }
+  return {
+    status: toDispatchStatus(draft.channel, providerResult),
+    externalId,
+    providerResult,
+    source: 'api-core',
+  };
+}
+
+async function dispatchViaGateway(draft: CommunicationDraft, role: string): Promise<DispatchRuntimeResult> {
+  const cfg = loadConfig();
+  const res = await fetch(`${cfg.channelGatewayUrl}/api/channels/send`, {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      'x-bisp-role': role,
+    },
+    body: JSON.stringify({ draft }),
+    signal: AbortSignal.timeout(cfg.channelGatewayTimeoutMs),
+  });
+  const payload = (await res.json().catch(() => ({}))) as {
+    error?: string;
+    detail?: string;
+    dispatchId?: string;
+    result?: Record<string, unknown>;
+  };
+  if (!res.ok) {
+    throw new Error(payload.detail ?? payload.error ?? `gateway dispatch failed (${res.status})`);
+  }
+  const result = payload.result ?? {};
+  if (result.status === 'failed' || payload.error) {
+    throw new Error(payload.detail ?? payload.error ?? 'gateway dispatch failed');
+  }
+  return {
+    status: toDispatchStatus(draft.channel, result),
+    externalId: String(result.messageId ?? payload.dispatchId ?? `gw_${draft.id}`),
+    providerResult: result,
+    source: 'gateway-channels',
+    dispatchId: payload.dispatchId,
+  };
+}
+
+async function dispatchDraft(state: ApiState, draft: CommunicationDraft, role: string): Promise<DispatchRuntimeResult> {
+  const mode = String(process.env.BISPCRM_CHANNEL_DISPATCH_MODE ?? 'gateway-first').toLowerCase();
+  const gatewayEnabled = mode !== 'local-only' && mode !== 'direct';
+  const gatewayRequired = mode === 'gateway-only';
+
+  if (gatewayEnabled) {
+    try {
+      return await dispatchViaGateway(draft, role);
+    } catch (error) {
+      if (gatewayRequired) throw error;
+      state.audit.write(
+        makeAuditRecord('channel-gateway', 'outbox.gateway.fallback_local', {
+          channel: draft.channel,
+          draftId: draft.id,
+          error: error instanceof Error ? error.message : String(error),
+        })
+      );
+    }
+  }
+
+  return dispatchViaLocalAdapters(state, draft);
 }
 
 export function buildServer(state = buildState()) {
@@ -1043,41 +1152,21 @@ export function buildServer(state = buildState()) {
     }
 
     try {
-      let externalId = '';
-      let providerResult: Record<string, unknown> = {};
-      if (item.draft.channel === 'telegram') {
-        const res = await state.channels.telegram.queueOfferMessage(item.draft);
-        externalId = `telegram_${String(res.queued)}`;
-        providerResult = { queued: res.queued };
-      } else if (item.draft.channel === 'email') {
-        const res = await state.channels.email.sendOrQueue(item.draft);
-        externalId = `email_${res.status}`;
-        providerResult = { status: res.status };
-      } else if (item.draft.channel === 'whatsapp') {
-        const res = await state.channels.whatsapp.sendOrQueue(item.draft);
-        externalId = res.messageId ?? `wa_${item.draft.id}`;
-        providerResult = { status: res.status, messageId: res.messageId };
-      } else if (['facebook', 'instagram', 'x'].includes(item.draft.channel)) {
-        const res = await state.channels.social.publish(item.draft);
-        externalId = `social_${res.platform}`;
-        providerResult = { queued: res.queued, platform: res.platform };
-      } else {
-        const res = await state.channels.elizaPublishing.publish(item.draft);
-        externalId = res.externalId;
-        providerResult = { externalId: res.externalId, status: res.status };
-      }
-
-      const status = item.draft.needsApproval ? 'queued' : 'sent';
+      const dispatch = await dispatchDraft(state, item.draft, String(req.headers['x-bisp-role'] ?? 'manager'));
+      const status = dispatch.status;
+      const externalId = dispatch.externalId;
       const updated = state.drafts.update(item.id, { status, externalId, sentAt: new Date().toISOString() });
       state.audit.write(makeAuditRecord('channel-gateway', 'outbox.sent', { outboxId: item.id, channel: item.draft.channel, status, externalId }));
       if (updated) void state.postgresMirror.saveOutbox([updated]);
       void state.postgresMirror.saveChannelDispatch(
         buildChannelDispatchRecord({
+          id: dispatch.dispatchId,
+          source: dispatch.source,
           draftId: item.id,
           channel: item.draft.channel,
           status,
           requestPayload: { draft: item.draft },
-          responsePayload: { externalId, ...providerResult },
+          responsePayload: { externalId, ...dispatch.providerResult },
         })
       );
       if (item.draft.customerId) {
@@ -1125,47 +1214,22 @@ export function buildServer(state = buildState()) {
       state.audit.write(makeAuditRecord('manager', 'outbox.approved', { outboxId: item.id, actor: req.body.actor ?? 'manager' }));
     }
     try {
-      let externalId = '';
-      let providerResult: Record<string, unknown> = {};
-      if (item.draft.channel === 'telegram') {
-        const res = await state.channels.telegram.queueOfferMessage(item.draft);
-        externalId = `telegram_${String(res.queued)}`;
-        providerResult = { queued: res.queued };
-      } else if (item.draft.channel === 'email') {
-        const res = await state.channels.email.sendOrQueue(item.draft);
-        externalId = `email_${res.status}`;
-        providerResult = { status: res.status };
-      } else if (item.draft.channel === 'whatsapp') {
-        const res = await state.channels.whatsapp.sendOrQueue(item.draft);
-        externalId = res.messageId ?? `wa_${item.draft.id}`;
-        providerResult = { status: res.status, messageId: res.messageId };
-      } else if (['facebook', 'instagram', 'x'].includes(item.draft.channel)) {
-        const res = await state.channels.social.publish(item.draft);
-        externalId = `social_${res.platform}`;
-        providerResult = { queued: res.queued, platform: res.platform };
-      } else {
-        const res = await state.channels.elizaPublishing.publish(item.draft);
-        externalId = res.externalId;
-        providerResult = { externalId: res.externalId, status: res.status };
-      }
-      // Derive real dispatch status from provider response
-      let dispatchStatus: 'queued' | 'sent' = 'queued';
-      if (item.draft.channel === 'telegram') {
-        dispatchStatus = (providerResult as { sent?: boolean }).sent ? 'sent' : 'queued';
-      } else if (item.draft.channel === 'email' || item.draft.channel === 'whatsapp') {
-        dispatchStatus = (providerResult as { status?: string }).status === 'sent' ? 'sent' : 'queued';
-      }
+      const dispatch = await dispatchDraft(state, item.draft, String(req.headers['x-bisp-role'] ?? req.body.actor ?? 'manager'));
+      const dispatchStatus = dispatch.status;
+      const externalId = dispatch.externalId;
 
       const updated = state.drafts.update(item.id, { status: dispatchStatus, externalId, sentAt: new Date().toISOString() });
       state.audit.write(makeAuditRecord('channel-gateway', 'outbox.sent', { outboxId: item.id, channel: item.draft.channel, status: dispatchStatus, externalId }));
       if (updated) void state.postgresMirror.saveOutbox([updated]);
       void state.postgresMirror.saveChannelDispatch(
         buildChannelDispatchRecord({
+          id: dispatch.dispatchId,
+          source: dispatch.source,
           draftId: item.id,
           channel: item.draft.channel,
           status: dispatchStatus,
           requestPayload: { draft: item.draft },
-          responsePayload: { externalId, ...providerResult },
+          responsePayload: { externalId, ...dispatch.providerResult },
         })
       );
 
@@ -1331,16 +1395,40 @@ export function buildServer(state = buildState()) {
   });
   app.get('/api/system/infra', async (req, reply) => {
     if (ensurePermission(req, reply, 'settings:write') === null) return;
-    const pg = new PgRuntime({ connectionString: process.env.DATABASE_URL ?? 'postgres://postgres:postgres@localhost:5432/copilotrm' });
+    const cfg = loadConfig();
+    const pg = new PgRuntime({ connectionString: cfg.dbUrl, migrationsDir: cfg.migrationsDir });
     const db = await pg.health().catch((e) => ({ ok: false, error: e instanceof Error ? e.message : String(e) }));
     await pg.close().catch(() => undefined);
-    const redisConfigured = Boolean(process.env.REDIS_URL ?? 'redis://localhost:6379');
+    const redisConfigured = Boolean(cfg.redisUrl);
     const mirror = await state.postgresMirror.health();
     const queue = await state.queueGateway.snapshot();
+    const dispatchMode = String(process.env.BISPCRM_CHANNEL_DISPATCH_MODE ?? 'gateway-first');
+    const gateway = await fetch(`${cfg.channelGatewayUrl}/health`, {
+      method: 'GET',
+      signal: AbortSignal.timeout(cfg.channelGatewayTimeoutMs),
+    })
+      .then(async (res) => ({
+        ok: res.ok,
+        status: res.status,
+        body: await res.json().catch(() => null),
+      }))
+      .catch((error) => ({
+        ok: false,
+        status: 0,
+        error: error instanceof Error ? error.message : String(error),
+      }));
     return {
       postgres: db,
       postgresMirror: mirror,
-      redis: { configured: redisConfigured, url: process.env.REDIS_URL ?? 'redis://localhost:6379' },
+      redis: { configured: redisConfigured, url: cfg.redisUrl },
+      runtime: {
+        rootDir: cfg.rootDir,
+        migrationsDir: cfg.migrationsDir,
+        dataDir: cfg.dataDir,
+        channelGatewayUrl: cfg.channelGatewayUrl,
+        channelDispatchMode: dispatchMode,
+      },
+      gateway,
       queue,
       queues: ['orchestrator-events', 'content-jobs', 'social-publish', 'media-jobs'],
       persistenceMode: process.env.BISPCRM_PERSISTENCE_MODE ?? 'memory',
@@ -1348,7 +1436,8 @@ export function buildServer(state = buildState()) {
   });
   app.post('/api/system/db/migrate', async (req, reply) => {
     if (ensurePermission(req, reply, 'settings:write') === null) return;
-    const pg = new PgRuntime({ connectionString: process.env.DATABASE_URL ?? 'postgres://postgres:postgres@localhost:5432/copilotrm' });
+    const cfg = loadConfig();
+    const pg = new PgRuntime({ connectionString: cfg.dbUrl, migrationsDir: cfg.migrationsDir });
     try {
       const result = await pg.runMigrations();
       state.audit.write(makeAuditRecord('system', 'db.migrations.run', result));
@@ -1418,6 +1507,10 @@ export function buildServer(state = buildState()) {
     // Company / System
     { key: 'COMPANY_NAME', category: 'company', label: 'Nome azienda' },
     { key: 'COPILOTRM_DATA_DIR', category: 'system', label: 'Data directory' },
+    { key: 'BISPCRM_RUNTIME_DATA_DIR', category: 'system', label: 'Runtime data directory' },
+    { key: 'BISPCRM_MIGRATIONS_DIR', category: 'system', label: 'Migrations directory' },
+    { key: 'BISPCRM_CHANNEL_GATEWAY_URL', category: 'system', label: 'Channel gateway URL' },
+    { key: 'BISPCRM_CHANNEL_DISPATCH_MODE', category: 'system', label: 'Dispatch mode' },
     { key: 'BISPCRM_PERSISTENCE_MODE', category: 'system', label: 'Persistence mode' },
     { key: 'BISPCRM_QUEUE_MODE', category: 'system', label: 'Queue mode' },
   ] as const;
