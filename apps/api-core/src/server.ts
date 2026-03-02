@@ -20,6 +20,7 @@ import { ElizaPublishingAdapterStub, InMemoryRAGStore } from '@bisp/integrations
 import { createLLMClient, type LLMClient } from '@bisp/integrations-llm';
 import { EmailChannelAdapter } from '@bisp/integrations-email';
 import { MediaGenerationServiceStub } from '@bisp/integrations-media';
+import { fetchAllRssFeeds, type RssItem, type RssSource } from '@bisp/integrations-rss';
 import { SocialChannelAdapter } from '@bisp/integrations-social';
 import { TelcoIngestService } from '@bisp/integrations-telco';
 import { TelegramChannelAdapter } from '@bisp/integrations-telegram';
@@ -210,6 +211,144 @@ function csvEnvList(name: string): string[] {
   return raw.split(',').map((s) => s.trim()).filter(Boolean);
 }
 
+function readRssSourcesFromEnv(): RssSource[] {
+  const raw = process.env.RSS_FEEDS;
+  if (raw) {
+    try {
+      const parsed = JSON.parse(raw) as RssSource[];
+      if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+    } catch {
+      // fallback defaults
+    }
+  }
+  return [
+    { url: 'https://www.hwupgrade.it/rss/news.xml', name: 'HWUpgrade', category: 'hardware' },
+    { url: 'https://www.tomshw.it/feed', name: 'TomsHW_IT', category: 'hardware' },
+    { url: 'https://www.hdblog.it/feed/', name: 'HDBlog', category: 'smartphone' },
+    { url: 'https://www.smartworld.it/feed', name: 'SmartWorld', category: 'smartphone' },
+    { url: 'https://www.key4biz.it/feed/', name: 'Key4Biz', category: 'tlc' },
+    { url: 'https://corrierecomunicazioni.it/feed/', name: 'CorriereComu', category: 'tlc' },
+    { url: 'https://www.rinnovabili.it/feed/', name: 'Rinnovabili', category: 'energy' },
+    { url: 'https://www.canaleenergia.com/feed/', name: 'CanaleEnergia', category: 'energy' },
+    { url: 'https://www.theverge.com/rss/index.xml', name: 'TheVerge', category: 'tech' },
+  ];
+}
+
+function toSlug(input: string): string {
+  return input.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '').slice(0, 60) || 'item';
+}
+
+function stripText(raw: string): string {
+  return raw
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function formatMoney(value?: number): string | undefined {
+  if (value == null || !Number.isFinite(value)) return undefined;
+  return `${value.toFixed(2)}€`;
+}
+
+function isMeaningfulOfferName(name: string): boolean {
+  const n = name.trim().toLowerCase();
+  if (n.length < 6) return false;
+  if (/^(altro|agenzia|teleselling|domiciliazione|bollettino)/.test(n)) return false;
+  if (/^\d{2,3}\s*-\s*\d{2,3}$/.test(n)) return false;
+  if (/offerta attivabile/.test(n)) return false;
+  return true;
+}
+
+function normalizeEnergyCandidate(input: {
+  operator: string;
+  offerName: string;
+  commodity?: string;
+  type?: string;
+  segment?: string;
+  fixedFeeEur?: number;
+  variablePriceCent?: number;
+  url?: string;
+  offerCode?: string;
+}): { title: string; conditions: string; cost?: number; family: string } | null {
+  if (!isMeaningfulOfferName(input.offerName)) return null;
+  const commodity = input.commodity === 'gas' ? 'gas' : input.commodity === 'dual' ? 'dual' : 'electricity';
+  const offerKind = input.type?.toUpperCase() === 'PLACET' ? 'PLACET' : input.type?.toUpperCase() === 'MLIBERO' ? 'Mercato Libero' : 'Offerta';
+  const segment = input.segment === 'business' ? 'business' : 'residential';
+  const operator = input.operator?.trim() || 'Operatore';
+  const title = `${operator} ${input.offerName}`.replace(/\s+/g, ' ').trim();
+  const priceVar = input.variablePriceCent != null ? `${input.variablePriceCent.toFixed(4)} c€/kWh|Smc` : undefined;
+  const parts = [
+    `domain=energy`,
+    `commodity=${commodity}`,
+    `type=${offerKind}`,
+    `segment=${segment}`,
+    input.offerCode ? `code=${input.offerCode}` : undefined,
+    formatMoney(input.fixedFeeEur) ? `fee_monthly=${formatMoney(input.fixedFeeEur)}` : undefined,
+    priceVar ? `price_variable=${priceVar}` : undefined,
+    input.url ? `source_url=${input.url}` : undefined,
+  ].filter(Boolean);
+  return {
+    title,
+    conditions: parts.join(' | '),
+    cost: input.fixedFeeEur,
+    family: commodity === 'gas' ? 'energy-gas' : commodity === 'dual' ? 'energy-dual' : 'energy-electricity',
+  };
+}
+
+function normalizeTelcoCandidate(input: {
+  operator: string;
+  offerName: string;
+  serviceType?: string;
+  monthlyPriceEur?: number;
+  speedMbps?: number;
+  dataUnlimited?: boolean;
+  minutesUnlimited?: boolean;
+  url?: string;
+}): { title: string; conditions: string; cost?: number; family: string } | null {
+  if (!isMeaningfulOfferName(input.offerName)) return null;
+  const operator = input.operator?.trim() || 'Operatore';
+  const svc = (input.serviceType ?? '').toLowerCase();
+  const family = svc === 'mobile' ? 'telco-mobile' : svc === 'fixed' ? 'telco-fixed' : svc === 'convergent' ? 'telco-convergent' : 'telco-connectivity';
+  const title = `${operator} ${input.offerName}`.replace(/\s+/g, ' ').trim();
+  const parts = [
+    `domain=telco`,
+    `service=${svc || 'connectivity'}`,
+    formatMoney(input.monthlyPriceEur) ? `fee_monthly=${formatMoney(input.monthlyPriceEur)}` : undefined,
+    input.speedMbps ? `speed_mbps=${input.speedMbps}` : undefined,
+    input.dataUnlimited ? 'data=unlimited' : undefined,
+    input.minutesUnlimited ? 'minutes=unlimited' : undefined,
+    input.url ? `source_url=${input.url}` : undefined,
+  ].filter(Boolean);
+  return {
+    title,
+    conditions: parts.join(' | '),
+    cost: input.monthlyPriceEur,
+    family,
+  };
+}
+
+function buildRssContentCard(item: RssItem, fallbackCategory?: string): ContentCard {
+  const category = item.category ?? fallbackCategory ?? 'tech';
+  const cleanDesc = stripText(item.description || '').slice(0, 420);
+  const title = stripText(item.title);
+  const hook = cleanDesc.slice(0, 160) || 'Nuova notizia rilevante per il team commerciale.';
+  const sourceName = item.sourceName ? toSlug(item.sourceName) : 'rss';
+  return {
+    id: `card_rss_${toSlug(item.id)}`,
+    source: 'rss',
+    sourceRef: `${sourceName}:${item.id}`,
+    title: `${title} [${category}]`,
+    hook,
+    blogDraft: `${title}\n\n${cleanDesc}\n\nFonte: ${item.link}`,
+    facebookDraft: `${title}\n${hook}\nFonte: ${item.link}`,
+    instagramDraft: `${title}\n${hook}`,
+    xDraft: `${title} — ${item.link}`,
+    telegramDraft: `${title}\n${hook}\n${item.link}`,
+    approvalStatus: 'pending',
+    createdAt: new Date().toISOString(),
+  };
+}
+
 function inferOfferSegments(category: ProductOffer['category']): Segment[] {
   if (category === 'energy') return ['famiglia', 'business'];
   if (category === 'connectivity') return ['fibra', 'famiglia', 'business'];
@@ -325,6 +464,212 @@ async function syncDaneaOffers(state: ApiState, actor = 'ingest-danea'): Promise
     }
   }
   return { synced: results.length, results };
+}
+
+async function ingestPublicOffers(
+  state: ApiState,
+  opts?: { source?: 'all' | 'energy' | 'telco'; maxOffers?: number; actor?: string }
+): Promise<{
+  imported: number;
+  skipped: number;
+  processed: number;
+  importedByFamily: Record<string, number>;
+  importedTitles: string[];
+  sourceStats: { energySources: number; telcoSources: number };
+}> {
+  const source = opts?.source ?? 'all';
+  const maxOffers = Math.max(1, Math.min(opts?.maxOffers ?? Number(process.env.BISPCRM_PUBLIC_OFFERS_MAX ?? 40), 300));
+  const normalize = (category: ProductOffer['category'], title: string) => normalizeOfferKey(category, title);
+  const existing = new Set(state.offers.listAll().map((o) => normalize(o.category, o.title)));
+  const actor = opts?.actor ?? 'ingest-public-offers';
+
+  const [energyResults, telcoResults] = await Promise.all([
+    source === 'all' || source === 'energy'
+      ? energyIngest.fetchAll({ timeout: 12_000, extraUrls: csvEnvList('OFFER_SOURCES_ENERGY') })
+      : Promise.resolve([]),
+    source === 'all' || source === 'telco'
+      ? telcoIngest.fetchAll({ timeoutMs: 12_000, extraUrls: csvEnvList('OFFER_SOURCES_TELCO') })
+      : Promise.resolve([]),
+  ]);
+
+  const candidates: Array<{
+    title: string;
+    category: ProductOffer['category'];
+    conditions: string;
+    cost?: number;
+    targetSegments: Segment[];
+    family: string;
+  }> = [];
+
+  energyResults.forEach((r) => {
+    r.offers.forEach((o) => {
+      const norm = normalizeEnergyCandidate({
+        operator: o.operator,
+        offerName: o.offerName,
+        commodity: o.commodity,
+        type: o.type,
+        segment: o.segment,
+        fixedFeeEur: o.fixedFeeEur,
+        variablePriceCent: o.variablePriceCent,
+        offerCode: o.offerCode,
+        url: o.url,
+      });
+      if (!norm) return;
+      candidates.push({
+        title: norm.title,
+        category: 'energy',
+        conditions: norm.conditions,
+        cost: norm.cost,
+        targetSegments: inferOfferSegments('energy'),
+        family: norm.family,
+      });
+    });
+  });
+
+  telcoResults.forEach((r) => {
+    r.offers.forEach((o) => {
+      const norm = normalizeTelcoCandidate({
+        operator: o.operator,
+        offerName: o.offerName,
+        serviceType: o.serviceType,
+        monthlyPriceEur: o.monthlyPriceEur,
+        speedMbps: o.speedMbps,
+        dataUnlimited: o.dataUnlimited,
+        minutesUnlimited: o.minutesUnlimited,
+        url: o.url,
+      });
+      if (!norm) return;
+      candidates.push({
+        title: norm.title,
+        category: 'connectivity',
+        conditions: norm.conditions,
+        cost: norm.cost,
+        targetSegments: inferOfferSegments('connectivity'),
+        family: norm.family,
+      });
+    });
+  });
+
+  const dedupe = new Set<string>();
+  let imported = 0;
+  let skipped = 0;
+  let processed = 0;
+  const importedTitles: string[] = [];
+  const importedByFamily: Record<string, number> = {};
+
+  for (const cand of candidates) {
+    processed += 1;
+    if (imported >= maxOffers) break;
+    const dedupeKey = `${cand.category}:${cand.title.trim().toLowerCase()}`;
+    if (dedupe.has(dedupeKey)) {
+      skipped += 1;
+      continue;
+    }
+    dedupe.add(dedupeKey);
+    const key = normalize(cand.category, cand.title);
+    if (existing.has(key)) {
+      skipped += 1;
+      continue;
+    }
+    existing.add(key);
+    await importPromoOffer(
+      state,
+      {
+        title: cand.title,
+        category: cand.category,
+        conditions: cand.conditions,
+        cost: cand.cost,
+        targetSegments: cand.targetSegments,
+      },
+      actor
+    );
+    imported += 1;
+    importedTitles.push(cand.title);
+    importedByFamily[cand.family] = (importedByFamily[cand.family] ?? 0) + 1;
+  }
+
+  return {
+    imported,
+    skipped,
+    processed,
+    importedByFamily,
+    importedTitles,
+    sourceStats: {
+      energySources: energyResults.length,
+      telcoSources: telcoResults.length,
+    },
+  };
+}
+
+async function ingestRssNews(
+  state: ApiState,
+  opts?: { maxItems?: number; actor?: string }
+): Promise<{
+  fetched: number;
+  imported: number;
+  skipped: number;
+  bySource: Record<string, number>;
+  byCategory: Record<string, number>;
+  items: Array<{ id: string; source: string; category: string; title: string; link: string }>;
+}> {
+  const maxItems = Math.max(1, Math.min(opts?.maxItems ?? 40, 300));
+  const sources = readRssSourcesFromEnv();
+  const items = await fetchAllRssFeeds(sources);
+  const sourceByUrl = new Map(sources.map((s) => [s.name, s]));
+  const existingRefs = new Set(
+    state.contentCards
+      .list()
+      .filter((c) => c.source === 'rss')
+      .map((c) => c.sourceRef.includes(':') ? c.sourceRef.split(':').slice(1).join(':') : c.sourceRef)
+  );
+  const bySource: Record<string, number> = {};
+  const byCategory: Record<string, number> = {};
+  const created: Array<{ id: string; source: string; category: string; title: string; link: string }> = [];
+  let skipped = 0;
+
+  for (const item of items) {
+    if (created.length >= maxItems) break;
+    if (!item.id || !item.title || !item.link) {
+      skipped += 1;
+      continue;
+    }
+    if (existingRefs.has(item.id)) {
+      skipped += 1;
+      continue;
+    }
+    const sourceCfg = sourceByUrl.get(item.sourceName ?? '');
+    const category = item.category ?? sourceCfg?.category ?? 'tech';
+    const card = buildRssContentCard(item, category);
+    state.contentCards.add(card);
+    existingRefs.add(item.id);
+    created.push({
+      id: item.id,
+      source: item.sourceName ?? sourceCfg?.name ?? 'rss',
+      category,
+      title: stripText(item.title),
+      link: item.link,
+    });
+    bySource[created[created.length - 1].source] = (bySource[created[created.length - 1].source] ?? 0) + 1;
+    byCategory[category] = (byCategory[category] ?? 0) + 1;
+  }
+
+  const actor = opts?.actor ?? 'ingest-rss';
+  state.audit.write(makeAuditRecord(actor, 'rss.synced', {
+    fetched: items.length,
+    imported: created.length,
+    skipped,
+    bySource,
+    byCategory,
+  }));
+
+  return {
+    fetched: items.length,
+    imported: created.length,
+    skipped,
+    bySource,
+    byCategory,
+    items: created,
+  };
 }
 
 
@@ -1148,82 +1493,22 @@ export function buildServer(state = buildState()) {
       'ingest.public-offers': async (ctx, cfg) => {
         ctx.log('info', 'start', 'Avvio ingest offerte pubbliche energia/TLC.');
         ctx.progress(5);
-        const maxOffers = Math.max(1, Math.min(Number(process.env.BISPCRM_PUBLIC_OFFERS_MAX ?? 40), 300));
-        const normalize = (category: ProductOffer['category'], title: string) => normalizeOfferKey(category, title);
-        const existing = new Set(state.offers.listAll().map((o) => normalize(o.category, o.title)));
-
         try {
-          const [energyResults, telcoResults] = await Promise.all([
-            energyIngest.fetchAll({ timeout: 12_000, extraUrls: csvEnvList('OFFER_SOURCES_ENERGY') }),
-            telcoIngest.fetchAll({ timeoutMs: 12_000, extraUrls: csvEnvList('OFFER_SOURCES_TELCO') }),
-          ]);
-          ctx.progress(35);
-          ctx.log('info', 'sources', 'Fonti lette.', {
-            energySources: energyResults.length,
-            telcoSources: telcoResults.length,
+          const offersRes = await ingestPublicOffers(state, {
+            source: 'all',
+            actor: 'events-ingest-public-offers',
           });
+          ctx.progress(60);
+          ctx.log('info', 'offers', 'Ingest offerte completato.', offersRes);
 
-          const candidates = [
-            ...energyResults.flatMap((r) =>
-              r.offers.map((o) => ({
-                title: `${o.operator} - ${o.offerName}`,
-                category: 'energy' as const,
-                conditions: [o.type, o.segment, o.commodity, o.url].filter(Boolean).join(' | '),
-                cost: o.fixedFeeEur,
-                targetSegments: inferOfferSegments('energy'),
-              }))
-            ),
-            ...telcoResults.flatMap((r) =>
-              r.offers.map((o) => ({
-                title: `${o.operator} - ${o.offerName}`,
-                category: 'connectivity' as const,
-                conditions: [o.serviceType, o.url].filter(Boolean).join(' | '),
-                cost: o.monthlyPriceEur,
-                targetSegments: inferOfferSegments('connectivity'),
-              }))
-            ),
-          ];
-
-          const imported: string[] = [];
-          let failed = 0;
-          let processed = 0;
-
-          for (const cand of candidates) {
-            const key = normalize(cand.category, cand.title);
-            if (existing.has(key)) continue;
-            existing.add(key);
-            processed += 1;
-            if (imported.length >= maxOffers) break;
-            try {
-              await importPromoOffer(
-                state,
-                {
-                  title: cand.title,
-                  category: cand.category,
-                  conditions: cand.conditions,
-                  cost: cand.cost,
-                  targetSegments: cand.targetSegments,
-                },
-                'events-ingest-public-offers'
-              );
-              imported.push(cand.title);
-              ctx.progress(35 + Math.round((imported.length / Math.max(1, maxOffers)) * 60));
-            } catch {
-              failed += 1;
-            }
-          }
-
-          if (failed > 0 && cfg.autoFix) {
-            const note = await maybeAdvisorNote(state, 'ingest.public-offers', `fallimenti: ${failed}`);
-            ctx.log('warn', 'advisor', note, { failed });
-          }
-
-          ctx.log('info', 'import', `Importate ${imported.length} offerte nuove (${failed} fallite).`, {
-            imported: imported.length,
-            failed,
-            processed,
+          const rssRes = await ingestRssNews(state, { maxItems: 25, actor: 'events-ingest-rss' });
+          ctx.progress(95);
+          ctx.log('info', 'rss', 'Ingest RSS completato.', {
+            imported: rssRes.imported,
+            bySource: rssRes.bySource,
+            byCategory: rssRes.byCategory,
           });
-          ctx.summary(`Ingest offerte pubbliche completato: ${imported.length} nuove offerte`);
+          ctx.summary(`Ingest completato: ${offersRes.imported} offerte + ${rssRes.imported} news RSS`);
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);
           const note = await maybeAdvisorNote(state, 'ingest.public-offers', message);
@@ -2378,10 +2663,70 @@ export function buildServer(state = buildState()) {
         ? 'invoice.synced'
         : undefined;
     const records = state.audit.list().filter((r) => {
-      if (!['ingest-danea', 'ingest-promo', 'events-ingest-danea', 'events-ingest-public-offers'].includes(r.actor)) return false;
+      if (![
+        'ingest-danea',
+        'ingest-promo',
+        'ingest-public-offers',
+        'ingest-rss',
+        'events-ingest-danea',
+        'events-ingest-public-offers',
+        'events-ingest-rss',
+      ].includes(r.actor)) return false;
       return type ? r.type.endsWith(type) : true;
     });
     return records.slice(-200).reverse();
+  });
+
+  app.post<{ Body?: { source?: 'all' | 'energy' | 'telco'; maxOffers?: number } }>(
+    '/api/ingest/public-offers/sync',
+    async (req, reply) => {
+      if (ensurePermission(req, reply, 'campaigns:manage') === null) return;
+      const result = await ingestPublicOffers(state, {
+        source: req.body?.source ?? 'all',
+        maxOffers: req.body?.maxOffers,
+        actor: 'ingest-public-offers',
+      });
+      return reply.code(202).send(result);
+    }
+  );
+
+  app.post<{ Body?: { maxItems?: number } }>(
+    '/api/ingest/rss/sync',
+    async (req, reply) => {
+      if (ensurePermission(req, reply, 'campaigns:manage') === null) return;
+      const result = await ingestRssNews(state, {
+        maxItems: req.body?.maxItems,
+        actor: 'ingest-rss',
+      });
+      return reply.code(202).send(result);
+    }
+  );
+
+  app.get<{ Querystring: { category?: string; source?: string; limit?: string } }>('/api/news', async (req) => {
+    const limit = Math.max(1, Math.min(Number(req.query.limit ?? 50), 200));
+    const categoryNeedle = req.query.category?.toLowerCase().trim();
+    const sourceNeedle = req.query.source?.toLowerCase().trim();
+    const items = state.contentCards.list()
+      .filter((c) => c.source === 'rss')
+      .map((c) => {
+        const source = (c.sourceRef.split(':')[0] || 'rss').toLowerCase();
+        const categoryMatch = /\[([^\]]+)\]\s*$/.exec(c.title);
+        const category = (categoryMatch?.[1] ?? 'tech').toLowerCase();
+        return {
+          id: c.id,
+          source,
+          category,
+          title: c.title.replace(/\s*\[[^\]]+\]\s*$/, ''),
+          hook: c.hook,
+          link: c.blogDraft?.match(/https?:\/\/\S+/)?.[0] ?? '',
+          createdAt: c.createdAt,
+          approvalStatus: c.approvalStatus,
+        };
+      })
+      .filter((x) => (categoryNeedle ? x.category.includes(categoryNeedle) : true))
+      .filter((x) => (sourceNeedle ? x.source.includes(sourceNeedle) : true))
+      .slice(0, limit);
+    return items;
   });
 
   app.post<{ Body: { title: string; category?: ProductOffer['category']; conditions?: string; stockQty?: number; cost?: number; targetSegments?: Segment[] } }>(
@@ -2446,6 +2791,7 @@ export function buildServer(state = buildState()) {
     }
 
     const filterType = req.query.type && eventCycleTypes.includes(req.query.type) ? req.query.type : undefined;
+    reply.hijack();
     const raw = reply.raw;
     raw.writeHead(200, {
       'Content-Type': 'text/event-stream',

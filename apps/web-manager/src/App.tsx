@@ -41,7 +41,17 @@ type ContentCard = {
 };
 
 type Customer = { id: string; fullName: string; phone?: string; segments: string[]; interests?: string[] };
-type Offer = { id: string; title: string; category: string; targetSegments: string[]; active: boolean };
+type Offer = {
+  id: string;
+  title: string;
+  category: string;
+  sourceType?: string;
+  targetSegments: string[];
+  active: boolean;
+  cost?: number;
+  suggestedPrice?: number;
+  conditions?: string;
+};
 type Task = { id: string; kind: string; title: string; status: string; priority: number; assigneeRole: string };
 type Ticket = { id: string; phoneLookup: string; deviceType: string; issue: string; outcome: string; inferredSignals: string[] };
 type Outbox = { id: string; status: string; draft: { channel: string; audience: string; body: string } };
@@ -96,6 +106,22 @@ type EventCycleStreamPayload = { kind: 'run-updated'; run: EventCycleRun };
 
 function csvToList(value: string): string[] {
   return value.split(',').map((x) => x.trim()).filter(Boolean);
+}
+
+function classifyOfferFamily(offer: Offer): string {
+  const hay = `${offer.title} ${offer.conditions ?? ''}`.toLowerCase();
+  if (offer.category === 'energy') {
+    if (/\bgas\b/.test(hay)) return 'energy / gas';
+    if (/\bdual\b|luce\s*\+\s*gas/.test(hay)) return 'energy / dual';
+    return 'energy / luce';
+  }
+  if (offer.category === 'connectivity') {
+    if (/\bmobile|sim|5g|4g|giga|gb\b/.test(hay)) return 'telco / mobile';
+    if (/\bfibra|ftth|fttc|adsl|fwa|casa\b/.test(hay)) return 'telco / fisso';
+    if (/\bconvergent|bundle|fisso\s*\+\s*mobile\b/.test(hay)) return 'telco / convergente';
+    return 'telco / connectivity';
+  }
+  return offer.category;
 }
 
 function App() {
@@ -154,6 +180,7 @@ function App() {
   const [promoCategory, setPromoCategory] = useState<'smartphone' | 'hardware' | 'connectivity' | 'accessory' | 'energy'>('smartphone');
   const [promoSegments, setPromoSegments] = useState('smartphone-upgrade,famiglia');
   const [ingestResult, setIngestResult] = useState<Record<string, unknown> | null>(null);
+  const [publicOffersSource, setPublicOffersSource] = useState<'all' | 'energy' | 'telco'>('all');
   const [eventConfigs, setEventConfigs] = useState<EventCycleConfigItem[]>([]);
   const [eventRuns, setEventRuns] = useState<EventCycleRun[]>([]);
   const [selectedEventType, setSelectedEventType] = useState<EventCycleType>('ingest.public-offers');
@@ -376,7 +403,7 @@ function App() {
   ];
   const eventLabels: Record<EventCycleType, string> = {
     'ingest.danea': 'Ingest Danea',
-    'ingest.public-offers': 'Ingest offerte luce/TLC',
+    'ingest.public-offers': 'Ingest offerte luce/TLC + RSS',
     'outbound.dispatch.approved': 'Outbound approved',
   };
 
@@ -551,11 +578,19 @@ function App() {
               <h2>Offers Catalog</h2>
               <div className="tableWrap">
                 <table>
-                  <thead><tr><th>ID</th><th>Titolo</th><th>Categoria</th><th>Target</th></tr></thead>
+                  <thead><tr><th>ID</th><th>Titolo</th><th>Famiglia</th><th>Sorgente</th><th>Prezzo</th><th>Target</th></tr></thead>
                   <tbody>
                     {offers.map((o) => (
                       <tr key={o.id}>
-                        <td>{o.id}</td><td>{o.title}</td><td>{o.category}</td><td>{o.targetSegments.join(', ')}</td>
+                        <td>{o.id}</td>
+                        <td>
+                          <strong>{o.title}</strong>
+                          {o.conditions && <div className="muted" style={{ fontSize: 11, marginTop: 2 }}>{o.conditions}</div>}
+                        </td>
+                        <td>{classifyOfferFamily(o)}</td>
+                        <td>{o.sourceType ?? 'n/a'}</td>
+                        <td>{o.suggestedPrice != null ? `${o.suggestedPrice}€` : o.cost != null ? `${o.cost}€` : '-'}</td>
+                        <td>{o.targetSegments.join(', ')}</td>
                       </tr>
                     ))}
                   </tbody>
@@ -1020,6 +1055,31 @@ function App() {
                 const res = await apiFetch('/api/ingest/danea/sync', { method: 'POST' });
                 setIngestResult(await res.json());
               })} disabled={busy}>Sync Danea stub</button>
+              <label style={{ marginTop: 10 }}>Sorgente offerte pubbliche</label>
+              <select value={publicOffersSource} onChange={(e) => setPublicOffersSource(e.target.value as 'all' | 'energy' | 'telco')}>
+                <option value="all">all (energy + telco)</option>
+                <option value="energy">solo energy</option>
+                <option value="telco">solo telco</option>
+              </select>
+              <div className="btnRow">
+                <button className="ghost" onClick={() => void runAction('ingest.publicOffers', async () => {
+                  const res = await apiFetch('/api/ingest/public-offers/sync', {
+                    method: 'POST',
+                    headers: { 'content-type': 'application/json' },
+                    body: JSON.stringify({ source: publicOffersSource }),
+                  });
+                  setIngestResult(await res.json());
+                })} disabled={busy}>Sync offerte pubbliche</button>
+                <button className="ghost" onClick={() => void runAction('ingest.rss', async () => {
+                  const res = await apiFetch('/api/ingest/rss/sync', {
+                    method: 'POST',
+                    headers: { 'content-type': 'application/json' },
+                    body: JSON.stringify({ maxItems: 30 }),
+                  });
+                  setIngestResult(await res.json());
+                  await refreshContentCards();
+                })} disabled={busy}>Sync RSS news</button>
+              </div>
               <label>Titolo promo</label>
               <input value={promoTitle} onChange={(e) => setPromoTitle(e.target.value)} />
               <label>Categoria</label>
