@@ -15,14 +15,14 @@ import { CustomerRepository } from '@bisp/domain-customers';
 import { ObjectiveRepository } from '@bisp/domain-objectives';
 import { OfferRepository } from '@bisp/domain-offers';
 import { DaneaReadOnlyStub } from '@bisp/integrations-danea';
-import { EnergyIngestService } from '@bisp/integrations-energy';
+import { EnergyIngestService, type EnergyIngestResult } from '@bisp/integrations-energy';
 import { ElizaPublishingAdapterStub, InMemoryRAGStore } from '@bisp/integrations-eliza';
 import { createLLMClient, type LLMClient } from '@bisp/integrations-llm';
 import { EmailChannelAdapter } from '@bisp/integrations-email';
 import { MediaGenerationServiceStub } from '@bisp/integrations-media';
 import { fetchAllRssFeeds, type RssItem, type RssSource } from '@bisp/integrations-rss';
 import { SocialChannelAdapter } from '@bisp/integrations-social';
-import { TelcoIngestService } from '@bisp/integrations-telco';
+import { TelcoIngestService, type TelcoIngestResult } from '@bisp/integrations-telco';
 import { TelegramChannelAdapter } from '@bisp/integrations-telegram';
 import { WhatsAppChannelAdapter } from '@bisp/integrations-whatsapp';
 import { HardwareQuoteChain } from '@bisp/integrations-hardware';
@@ -504,12 +504,14 @@ async function ingestPublicOffers(
     deactivated += 1;
   });
 
-  const [energyResults, telcoResults] = await Promise.all([
+  const energyService = new EnergyIngestService();
+  const telcoService = new TelcoIngestService();
+  const [energyResults, telcoResults]: [EnergyIngestResult[], TelcoIngestResult[]] = await Promise.all([
     source === 'all' || source === 'energy'
-      ? energyIngest.fetchAll({ timeout: 12_000, extraUrls: csvEnvList('OFFER_SOURCES_ENERGY') })
+      ? energyService.fetchAll({ timeout: 12_000, extraUrls: csvEnvList('OFFER_SOURCES_ENERGY') })
       : Promise.resolve([]),
     source === 'all' || source === 'telco'
-      ? telcoIngest.fetchAll({ timeoutMs: 12_000, extraUrls: csvEnvList('OFFER_SOURCES_TELCO') })
+      ? telcoService.fetchAll({ timeoutMs: 12_000, extraUrls: csvEnvList('OFFER_SOURCES_TELCO') })
       : Promise.resolve([]),
   ]);
 
