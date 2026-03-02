@@ -259,6 +259,16 @@ function isMeaningfulOfferName(name: string): boolean {
   return true;
 }
 
+function shouldDeactivateNoisyPublicOffer(offer: ProductOffer): boolean {
+  if (offer.sourceType !== 'promo') return false;
+  if (!['energy', 'connectivity'].includes(offer.category)) return false;
+  const text = `${offer.title} ${offer.conditions ?? ''}`.toLowerCase();
+  if (/^(altro|agenzia|teleselling|domiciliazione|bollettino)/.test(offer.title.trim().toLowerCase())) return true;
+  if (/^\d{2,3}\s*-\s*\d{2,3}$/.test(offer.title.trim().toLowerCase())) return true;
+  if (/offerta attivabile presso punto vendita|domiciliazione bancaria - domiciliazione postale/.test(text)) return true;
+  return false;
+}
+
 function normalizeEnergyCandidate(input: {
   operator: string;
   offerName: string;
@@ -470,6 +480,7 @@ async function ingestPublicOffers(
   state: ApiState,
   opts?: { source?: 'all' | 'energy' | 'telco'; maxOffers?: number; actor?: string }
 ): Promise<{
+  deactivated: number;
   imported: number;
   skipped: number;
   processed: number;
@@ -482,6 +493,16 @@ async function ingestPublicOffers(
   const normalize = (category: ProductOffer['category'], title: string) => normalizeOfferKey(category, title);
   const existing = new Set(state.offers.listAll().map((o) => normalize(o.category, o.title)));
   const actor = opts?.actor ?? 'ingest-public-offers';
+
+  let deactivated = 0;
+  state.offers.listAll().forEach((offer) => {
+    if (!offer.active) return;
+    if (!shouldDeactivateNoisyPublicOffer(offer)) return;
+    const next: ProductOffer = { ...offer, active: false };
+    state.offers.upsert(next);
+    void state.postgresMirror.saveOffer(next);
+    deactivated += 1;
+  });
 
   const [energyResults, telcoResults] = await Promise.all([
     source === 'all' || source === 'energy'
@@ -589,6 +610,7 @@ async function ingestPublicOffers(
   }
 
   return {
+    deactivated,
     imported,
     skipped,
     processed,
