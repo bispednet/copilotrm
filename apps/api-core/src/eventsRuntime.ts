@@ -29,6 +29,11 @@ export interface EventRun {
   logs: EventRunLog[];
 }
 
+export interface EventRuntimeStreamEvent {
+  kind: 'run-updated';
+  run: EventRun;
+}
+
 export interface EventRunContext {
   run: EventRun;
   log: (level: EventRunLog['level'], step: string, message: string, details?: Record<string, unknown>) => void;
@@ -56,6 +61,8 @@ export class EventRuntime {
   private readonly runningTypes = new Set<EventCycleType>();
   private readonly maxRuns: number;
   private readonly makeId: (prefix: string) => string;
+  private readonly subscribers = new Map<number, (event: EventRuntimeStreamEvent) => void>();
+  private nextSubscriberId = 1;
 
   constructor(opts: {
     defaults: Record<EventCycleType, EventCycleConfig>;
@@ -112,6 +119,25 @@ export class EventRuntime {
     return this.runningTypes.has(type);
   }
 
+  subscribe(listener: (event: EventRuntimeStreamEvent) => void): () => void {
+    const id = this.nextSubscriberId++;
+    this.subscribers.set(id, listener);
+    return () => {
+      this.subscribers.delete(id);
+    };
+  }
+
+  private emitRun(run: EventRun): void {
+    const snapshot: EventRuntimeStreamEvent = { kind: 'run-updated', run: { ...run, logs: [...run.logs] } };
+    this.subscribers.forEach((listener) => {
+      try {
+        listener(snapshot);
+      } catch {
+        // best effort broadcast
+      }
+    });
+  }
+
   async trigger(type: EventCycleType, triggeredBy: 'manual' | 'scheduler'): Promise<EventRun> {
     const handler = this.handlers.get(type);
     const cfg = this.configs.get(type);
@@ -137,6 +163,7 @@ export class EventRuntime {
       tail.forEach((id) => this.runs.delete(id));
     }
     this.runningTypes.add(type);
+    this.emitRun(run);
 
     const ctx: EventRunContext = {
       run,
@@ -148,12 +175,15 @@ export class EventRuntime {
           message,
           details,
         });
+        this.emitRun(run);
       },
       progress: (value) => {
         run.progress = clampProgress(value);
+        this.emitRun(run);
       },
       summary: (text) => {
         run.summary = text;
+        this.emitRun(run);
       },
     };
 
@@ -170,6 +200,7 @@ export class EventRuntime {
     } finally {
       run.endedAt = new Date().toISOString();
       this.runningTypes.delete(type);
+      this.emitRun(run);
     }
 
     return { ...run, logs: [...run.logs] };
@@ -193,4 +224,3 @@ export class EventRuntime {
     this.timers.clear();
   }
 }
-

@@ -1052,6 +1052,10 @@ export function buildServer(state = buildState()) {
     const role = raw as RbacRole;
     return role in ROLE_PERMISSIONS ? role : 'viewer';
   };
+  const resolveRoleCandidate = (raw: unknown): RbacRole => {
+    const role = String(raw ?? 'viewer') as RbacRole;
+    return role in ROLE_PERMISSIONS ? role : 'viewer';
+  };
   const ensurePermission = (
     req: { headers: Record<string, unknown> },
     reply: { code: (code: number) => { send: (payload: unknown) => unknown } },
@@ -2428,6 +2432,58 @@ export function buildServer(state = buildState()) {
     const type = req.query.type && eventCycleTypes.includes(req.query.type) ? req.query.type : undefined;
     const limit = req.query.limit ? Number(req.query.limit) : undefined;
     return eventRuntime.listRuns({ type, limit });
+  });
+
+  app.get<{ Querystring: { type?: EventCycleType; bispRole?: string } }>('/api/events/stream', async (req, reply) => {
+    const headerRole = req.headers['x-bisp-role'];
+    const queryRole = req.query.bispRole;
+    const role = resolveRoleCandidate(headerRole ?? queryRole);
+    if (authEnabled && !headerRole && !queryRole) {
+      return reply.code(401).send({ error: 'Missing x-bisp-role header or bispRole query', authMode });
+    }
+    if (authEnabled && !can(role, 'kpi:read')) {
+      return reply.code(403).send({ error: 'Forbidden', role, permission: 'kpi:read', authMode });
+    }
+
+    const filterType = req.query.type && eventCycleTypes.includes(req.query.type) ? req.query.type : undefined;
+    const raw = reply.raw;
+    raw.writeHead(200, {
+      'Content-Type': 'text/event-stream',
+      'Cache-Control': 'no-cache, no-transform',
+      Connection: 'keep-alive',
+      'X-Accel-Buffering': 'no',
+    });
+
+    const writeEvent = (event: string, data: unknown): void => {
+      raw.write(`event: ${event}\n`);
+      raw.write(`data: ${JSON.stringify(data)}\n\n`);
+    };
+
+    writeEvent('ready', {
+      ok: true,
+      ts: new Date().toISOString(),
+      role,
+      filterType: filterType ?? null,
+      initial: eventRuntime.listRuns({ type: filterType, limit: 30 }),
+    });
+
+    const unsubscribe = eventRuntime.subscribe((evt) => {
+      if (filterType && evt.run.type !== filterType) return;
+      writeEvent(evt.kind, evt);
+    });
+
+    const heartbeat = setInterval(() => {
+      raw.write(`: ping ${Date.now()}\n\n`);
+    }, 15000);
+
+    const cleanup = () => {
+      clearInterval(heartbeat);
+      unsubscribe();
+    };
+    raw.on('close', cleanup);
+    raw.on('error', cleanup);
+
+    return reply;
   });
 
   app.get<{ Params: { runId: string } }>('/api/events/runs/:runId', async (req, reply) => {

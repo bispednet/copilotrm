@@ -92,6 +92,7 @@ type EventCycleRun = {
   summary?: string;
   logs: EventCycleRunLog[];
 };
+type EventCycleStreamPayload = { kind: 'run-updated'; run: EventCycleRun };
 
 function csvToList(value: string): string[] {
   return value.split(',').map((x) => x.trim()).filter(Boolean);
@@ -158,6 +159,8 @@ function App() {
   const [selectedEventType, setSelectedEventType] = useState<EventCycleType>('ingest.public-offers');
   const [selectedEventRunId, setSelectedEventRunId] = useState<string | null>(null);
   const [selectedEventRun, setSelectedEventRun] = useState<EventCycleRun | null>(null);
+  const [eventStreamState, setEventStreamState] = useState<'connecting' | 'live' | 'offline'>('offline');
+  const [eventStreamError, setEventStreamError] = useState('');
 
   const [scenarioName, setScenarioName] = useState('smartphonePromo');
   const [scenarioResult, setScenarioResult] = useState<Record<string, unknown> | null>(null);
@@ -233,13 +236,78 @@ function App() {
 
   useEffect(() => {
     if (page !== 'events') return;
+
+    let mounted = true;
+    let source: EventSource | null = null;
+    let reconnectTimer: number | undefined;
+    let fallbackTimer: number | undefined;
+
+    const mergeRun = (run: EventCycleRun) => {
+      setEventRuns((prev) => {
+        const next = [...prev];
+        const idx = next.findIndex((r) => r.id === run.id);
+        if (idx >= 0) next[idx] = run;
+        else next.unshift(run);
+        return next.slice(0, 80);
+      });
+      setSelectedEventRun((prev) => (prev?.id === run.id ? run : prev));
+    };
+
+    const connect = () => {
+      setEventStreamState('connecting');
+      setEventStreamError('');
+      const streamUrl = new URL(`${API}/api/events/stream`);
+      streamUrl.searchParams.set('type', selectedEventType);
+      streamUrl.searchParams.set('bispRole', role);
+      source = new EventSource(streamUrl.toString());
+
+      source.addEventListener('ready', (evt) => {
+        if (!mounted) return;
+        setEventStreamState('live');
+        const payload = JSON.parse((evt as MessageEvent).data) as { initial?: EventCycleRun[] };
+        if (Array.isArray(payload.initial)) {
+          setEventRuns(payload.initial);
+          setSelectedEventRun((prev) => (prev ? payload.initial?.find((r) => r.id === prev.id) ?? prev : prev));
+        }
+      });
+
+      source.addEventListener('run-updated', (evt) => {
+        if (!mounted) return;
+        const payload = JSON.parse((evt as MessageEvent).data) as EventCycleStreamPayload;
+        if (payload?.run) mergeRun(payload.run);
+      });
+
+      source.onerror = () => {
+        if (!mounted) return;
+        setEventStreamState('offline');
+        setEventStreamError('Stream SSE non disponibile: fallback polling attivo');
+        source?.close();
+        source = null;
+        if (!reconnectTimer) {
+          reconnectTimer = window.setTimeout(() => {
+            reconnectTimer = undefined;
+            if (mounted) connect();
+          }, 4000);
+        }
+      };
+    };
+
     void refreshEvents(selectedEventType);
-    const timer = window.setInterval(() => {
+    connect();
+
+    fallbackTimer = window.setInterval(() => {
+      if (!mounted) return;
       void refreshEvents(selectedEventType);
       if (selectedEventRunId) void loadEventRun(selectedEventRunId);
-    }, 2500);
-    return () => window.clearInterval(timer);
-  }, [page, selectedEventType, selectedEventRunId]); // eslint-disable-line react-hooks/exhaustive-deps
+    }, 15000);
+
+    return () => {
+      mounted = false;
+      if (reconnectTimer) window.clearTimeout(reconnectTimer);
+      if (fallbackTimer) window.clearInterval(fallbackTimer);
+      source?.close();
+    };
+  }, [page, selectedEventType, role, selectedEventRunId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   async function runAction(label: string, fn: () => Promise<void>): Promise<void> {
     setBusy(true);
@@ -805,6 +873,10 @@ function App() {
             <article className="card">
               <h2>Eventi & Scheduler</h2>
               <p className="lede">Controlla i cicli automatici, attivali/disattivali e avviali manualmente con log operativo.</p>
+              <p className="muted" style={{ marginBottom: 8, fontSize: 12 }}>
+                Live stream: <strong>{eventStreamState}</strong>
+                {eventStreamError ? ` · ${eventStreamError}` : ''}
+              </p>
               <div className="btnRow" style={{ marginBottom: 12 }}>
                 <button onClick={() => void runAction('events.refresh', () => refreshEvents(selectedEventType))} disabled={busy}>Aggiorna</button>
               </div>
