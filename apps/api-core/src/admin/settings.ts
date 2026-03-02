@@ -61,6 +61,15 @@ const SETTING_CATALOG: Array<{
   { key: 'agents.hardware.enabled', envKeys: [], category: 'agents', type: 'boolean', description: 'Abilita agent hardware/software.', parse: () => true },
   { key: 'system.defaultApprovalMode', envKeys: [], category: 'system', type: 'string', description: 'Default approval mode (manual/auto-safe).', parse: () => 'manual' },
   { key: 'system.maxSocialPostsPerDay', envKeys: [], category: 'system', type: 'number', description: 'Limite post social/day complessivo.', parse: () => 10 },
+  { key: 'events.ingest.danea.enabled', envKeys: [], category: 'system', type: 'boolean', description: 'Scheduler ingest Danea attivo.', parse: () => false },
+  { key: 'events.ingest.danea.intervalSec', envKeys: [], category: 'system', type: 'number', description: 'Intervallo scheduler ingest Danea (sec).', parse: () => 1800 },
+  { key: 'events.ingest.danea.autoFix', envKeys: [], category: 'system', type: 'boolean', description: 'Auto-fix ingest Danea su errore.', parse: () => true },
+  { key: 'events.ingest.publicOffers.enabled', envKeys: [], category: 'system', type: 'boolean', description: 'Scheduler ingest offerte pubbliche attivo.', parse: () => false },
+  { key: 'events.ingest.publicOffers.intervalSec', envKeys: [], category: 'system', type: 'number', description: 'Intervallo scheduler ingest offerte pubbliche (sec).', parse: () => 3600 },
+  { key: 'events.ingest.publicOffers.autoFix', envKeys: [], category: 'system', type: 'boolean', description: 'Auto-fix ingest offerte pubbliche su errore.', parse: () => true },
+  { key: 'events.outbound.approved.enabled', envKeys: [], category: 'system', type: 'boolean', description: 'Scheduler dispatch outbox approved attivo.', parse: () => false },
+  { key: 'events.outbound.approved.intervalSec', envKeys: [], category: 'system', type: 'number', description: 'Intervallo scheduler dispatch outbox approved (sec).', parse: () => 300 },
+  { key: 'events.outbound.approved.autoFix', envKeys: [], category: 'system', type: 'boolean', description: 'Auto-fix dispatch outbox approved su errore.', parse: () => true },
 ];
 
 function parseBool(raw: string): boolean {

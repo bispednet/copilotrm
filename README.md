@@ -150,6 +150,11 @@ GET  /api/assist/tickets/:id/scheda
 POST /api/assist/tickets/:id/outcome
 POST /api/ingest/danea/sync
 POST /api/ingest/promo
+GET  /api/events/config
+PATCH /api/events/config/:type
+POST /api/events/run
+GET  /api/events/runs
+GET  /api/events/runs/:runId
 GET  /api/admin/settings
 PATCH /api/admin/settings/:key
 GET  /api/admin/agents

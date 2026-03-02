@@ -15,11 +15,13 @@ import { CustomerRepository } from '@bisp/domain-customers';
 import { ObjectiveRepository } from '@bisp/domain-objectives';
 import { OfferRepository } from '@bisp/domain-offers';
 import { DaneaReadOnlyStub } from '@bisp/integrations-danea';
+import { EnergyIngestService } from '@bisp/integrations-energy';
 import { ElizaPublishingAdapterStub, InMemoryRAGStore } from '@bisp/integrations-eliza';
 import { createLLMClient, type LLMClient } from '@bisp/integrations-llm';
 import { EmailChannelAdapter } from '@bisp/integrations-email';
 import { MediaGenerationServiceStub } from '@bisp/integrations-media';
 import { SocialChannelAdapter } from '@bisp/integrations-social';
+import { TelcoIngestService } from '@bisp/integrations-telco';
 import { TelegramChannelAdapter } from '@bisp/integrations-telegram';
 import { WhatsAppChannelAdapter } from '@bisp/integrations-whatsapp';
 import { HardwareQuoteChain } from '@bisp/integrations-hardware';
@@ -50,6 +52,7 @@ import type { ChannelDispatchRecord, MediaJobRecord } from './postgresMirror';
 import { PostgresMirror } from './postgresMirror';
 import { QueueGateway } from './queueGateway';
 import { scenarioFactory } from './scenarioFactory';
+import { EventRuntime, type EventCycleType } from './eventsRuntime';
 import {
   buildCampaignTasks,
   buildOneToManyDraftsForOffer,
@@ -200,6 +203,130 @@ function countTodayOneToOneDispatched(state: ApiState): number {
     return d === today;
   }).length;
 }
+
+function csvEnvList(name: string): string[] {
+  const raw = process.env[name];
+  if (!raw) return [];
+  return raw.split(',').map((s) => s.trim()).filter(Boolean);
+}
+
+function inferOfferSegments(category: ProductOffer['category']): Segment[] {
+  if (category === 'energy') return ['famiglia', 'business'];
+  if (category === 'connectivity') return ['fibra', 'famiglia', 'business'];
+  if (category === 'smartphone') return ['smartphone-upgrade', 'famiglia'];
+  if (category === 'hardware') return ['gamer'];
+  return ['famiglia'];
+}
+
+function normalizeOfferKey(category: ProductOffer['category'], title: string): string {
+  return `${category}:${title.trim().toLowerCase()}`;
+}
+
+async function maybeAdvisorNote(state: ApiState, context: string, errorMessage: string): Promise<string> {
+  if (!state.llm) {
+    return `Intervento automatico suggerito: ridurre batch e timeout, isolare la fonte che fallisce, poi riprovare. (${context})`;
+  }
+  try {
+    const out = await state.llm.chat(
+      [
+        { role: 'system', content: 'Sei un operatore NOC CRM. Fornisci una sola frase operativa in italiano, concreta, max 22 parole.' },
+        { role: 'user', content: `Contesto: ${context}. Errore: ${errorMessage}. Suggerisci la correzione immediata.` },
+      ],
+      { tier: 'small', temperature: 0.1, maxTokens: 80 }
+    );
+    const msg = out.content.trim();
+    return msg.length > 0 ? msg : `Riprova con timeout più alto e batch ridotto. (${context})`;
+  } catch {
+    return `Riprova con timeout più alto e batch ridotto. (${context})`;
+  }
+}
+
+async function importPromoOffer(
+  state: ApiState,
+  params: { title: string; category: ProductOffer['category']; conditions?: string; cost?: number; targetSegments?: Segment[] },
+  actor: string
+): Promise<{ offer: ProductOffer; orchestrator: { tasks: number; drafts: number } }> {
+  const offer: ProductOffer = {
+    id: makeId('offer'),
+    sourceType: 'promo',
+    category: params.category,
+    title: params.title,
+    conditions: params.conditions,
+    cost: params.cost,
+    suggestedPrice: params.cost ? Math.round(params.cost * 1.15) : undefined,
+    marginPct: params.cost ? 15 : undefined,
+    stockQty: 10,
+    targetSegments: params.targetSegments ?? inferOfferSegments(params.category),
+    active: true,
+  };
+  state.offers.upsert(offer);
+  void state.postgresMirror.saveOffer(offer);
+  state.rag.add({ id: `offer:${offer.id}`, text: `${offer.title}. ${offer.conditions ?? ''}` });
+  const event: DomainEvent = {
+    id: makeId('evt'),
+    type: 'offer.promo.ingested',
+    occurredAt: new Date().toISOString(),
+    payload: { offerId: offer.id, title: offer.title, conditions: offer.conditions },
+  };
+  if (envFlag('BISPCRM_QUEUE_ORCHESTRATOR_EVENTS', false)) {
+    void state.queueGateway.enqueueOrchestrator(event);
+  }
+  const output = state.orchestrator.run({
+    event,
+    activeObjectives: state.objectives.listActive(),
+    activeOffers: state.offers.listActive(),
+    now: new Date().toISOString(),
+  });
+  persistOperationalOutput(state, output);
+  state.audit.write(makeAuditRecord(actor, 'promo.ingested', { offerId: offer.id, title: offer.title, category: offer.category }));
+  return { offer, orchestrator: { tasks: output.tasks.length, drafts: output.drafts.length } };
+}
+
+async function syncDaneaOffers(state: ApiState, actor = 'ingest-danea'): Promise<{ synced: number; results: Array<{ invoiceId: string; offer: ProductOffer }> }> {
+  const invoices = state.danea.listRecentInvoices();
+  const results: Array<{ invoiceId: string; offer: ProductOffer }> = [];
+  for (const invoice of invoices) {
+    for (const line of invoice.lines) {
+      const title = line.description;
+      const offerId = makeId('offer');
+      const category: ProductOffer['category'] = /oppo|iphone|samsung|smartphone/i.test(title)
+        ? 'smartphone'
+        : /fibra|router|mesh/i.test(title)
+          ? 'connectivity'
+          : 'hardware';
+      const offer: ProductOffer = {
+        id: offerId,
+        sourceType: 'invoice',
+        category,
+        title,
+        cost: line.unitCost,
+        suggestedPrice: Math.round(line.unitCost * 1.18),
+        marginPct: 18,
+        stockQty: line.qty,
+        targetSegments: category === 'hardware' ? ['gamer'] : category === 'smartphone' ? ['smartphone-upgrade', 'famiglia'] : ['fibra', 'gamer'],
+        active: true,
+      };
+      state.offers.upsert(offer);
+      void state.postgresMirror.saveOffer(offer);
+      state.rag.add({ id: `offer:${offer.id}`, text: `${offer.title}. costo ${offer.cost}. prezzo suggerito ${offer.suggestedPrice}.` });
+      const event: DomainEvent = {
+        id: makeId('evt'),
+        type: 'danea.invoice.ingested',
+        occurredAt: invoice.receivedAt,
+        payload: { invoiceId: invoice.id, lines: invoice.lines },
+      };
+      if (envFlag('BISPCRM_QUEUE_ORCHESTRATOR_EVENTS', false)) {
+        void state.queueGateway.enqueueOrchestrator(event);
+      }
+      const output = state.orchestrator.run({ event, activeObjectives: state.objectives.listActive(), activeOffers: state.offers.listActive(), now: new Date().toISOString() });
+      persistOperationalOutput(state, output);
+      state.audit.write(makeAuditRecord(actor, 'invoice.synced', { invoiceId: invoice.id, offerId, line: title }));
+      results.push({ invoiceId: invoice.id, offer });
+    }
+  }
+  return { synced: results.length, results };
+}
+
 
 /**
  * Genera uno .zip in-memory contenente il plugin WordPress CopilotRM.
@@ -940,6 +1067,209 @@ export function buildServer(state = buildState()) {
     reply.code(403).send({ error: 'Forbidden', role, permission, authMode });
     return null;
   };
+
+  const energyIngest = new EnergyIngestService();
+  const telcoIngest = new TelcoIngestService();
+  const eventCycleTypes: EventCycleType[] = ['ingest.danea', 'ingest.public-offers', 'outbound.dispatch.approved'];
+  const eventConfigKeyMap: Record<EventCycleType, { enabled: string; intervalSec: string; autoFix: string }> = {
+    'ingest.danea': {
+      enabled: 'events.ingest.danea.enabled',
+      intervalSec: 'events.ingest.danea.intervalSec',
+      autoFix: 'events.ingest.danea.autoFix',
+    },
+    'ingest.public-offers': {
+      enabled: 'events.ingest.publicOffers.enabled',
+      intervalSec: 'events.ingest.publicOffers.intervalSec',
+      autoFix: 'events.ingest.publicOffers.autoFix',
+    },
+    'outbound.dispatch.approved': {
+      enabled: 'events.outbound.approved.enabled',
+      intervalSec: 'events.outbound.approved.intervalSec',
+      autoFix: 'events.outbound.approved.autoFix',
+    },
+  };
+  const eventDefaults: Record<EventCycleType, { enabled: boolean; intervalSec: number; autoFix: boolean }> = {
+    'ingest.danea': { enabled: false, intervalSec: 1800, autoFix: true },
+    'ingest.public-offers': { enabled: false, intervalSec: 3600, autoFix: true },
+    'outbound.dispatch.approved': { enabled: false, intervalSec: 300, autoFix: true },
+  };
+
+  function readEventConfig(type: EventCycleType): { enabled: boolean; intervalSec: number; autoFix: boolean } {
+    const keys = eventConfigKeyMap[type];
+    const enabledRaw = state.adminSettings.get(keys.enabled, { masked: false })?.value;
+    const intervalRaw = state.adminSettings.get(keys.intervalSec, { masked: false })?.value;
+    const autoFixRaw = state.adminSettings.get(keys.autoFix, { masked: false })?.value;
+
+    const enabled = typeof enabledRaw === 'boolean' ? enabledRaw : eventDefaults[type].enabled;
+    const intervalSec = typeof intervalRaw === 'number'
+      ? intervalRaw
+      : typeof intervalRaw === 'string'
+        ? Number(intervalRaw)
+        : eventDefaults[type].intervalSec;
+    const autoFix = typeof autoFixRaw === 'boolean' ? autoFixRaw : eventDefaults[type].autoFix;
+    return {
+      enabled,
+      intervalSec: Number.isFinite(intervalSec) && intervalSec > 0 ? intervalSec : eventDefaults[type].intervalSec,
+      autoFix,
+    };
+  }
+
+  function persistEventConfig(type: EventCycleType, cfg: { enabled: boolean; intervalSec: number; autoFix: boolean }): void {
+    const keys = eventConfigKeyMap[type];
+    state.adminSettings.upsert(keys.enabled, cfg.enabled);
+    state.adminSettings.upsert(keys.intervalSec, cfg.intervalSec);
+    state.adminSettings.upsert(keys.autoFix, cfg.autoFix);
+    void state.postgresMirror.saveAdminSetting(state.adminSettings.get(keys.enabled, { masked: false })!);
+    void state.postgresMirror.saveAdminSetting(state.adminSettings.get(keys.intervalSec, { masked: false })!);
+    void state.postgresMirror.saveAdminSetting(state.adminSettings.get(keys.autoFix, { masked: false })!);
+  }
+
+  eventCycleTypes.forEach((type) => persistEventConfig(type, readEventConfig(type)));
+
+  const eventRuntime = new EventRuntime({
+    defaults: {
+      'ingest.danea': readEventConfig('ingest.danea'),
+      'ingest.public-offers': readEventConfig('ingest.public-offers'),
+      'outbound.dispatch.approved': readEventConfig('outbound.dispatch.approved'),
+    },
+    handlers: {
+      'ingest.danea': async (ctx, cfg) => {
+        ctx.log('info', 'start', 'Avvio ingest Danea (fatture/offerte).');
+        ctx.progress(5);
+        const res = await syncDaneaOffers(state, 'events-ingest-danea');
+        ctx.progress(85);
+        ctx.log('info', 'sync', `Sincronizzate ${res.synced} offerte da Danea.`, { synced: res.synced });
+        ctx.summary(`Ingest Danea completato: ${res.synced} offerte`);
+      },
+      'ingest.public-offers': async (ctx, cfg) => {
+        ctx.log('info', 'start', 'Avvio ingest offerte pubbliche energia/TLC.');
+        ctx.progress(5);
+        const maxOffers = Math.max(1, Math.min(Number(process.env.BISPCRM_PUBLIC_OFFERS_MAX ?? 40), 300));
+        const normalize = (category: ProductOffer['category'], title: string) => normalizeOfferKey(category, title);
+        const existing = new Set(state.offers.listAll().map((o) => normalize(o.category, o.title)));
+
+        try {
+          const [energyResults, telcoResults] = await Promise.all([
+            energyIngest.fetchAll({ timeout: 12_000, extraUrls: csvEnvList('OFFER_SOURCES_ENERGY') }),
+            telcoIngest.fetchAll({ timeoutMs: 12_000, extraUrls: csvEnvList('OFFER_SOURCES_TELCO') }),
+          ]);
+          ctx.progress(35);
+          ctx.log('info', 'sources', 'Fonti lette.', {
+            energySources: energyResults.length,
+            telcoSources: telcoResults.length,
+          });
+
+          const candidates = [
+            ...energyResults.flatMap((r) =>
+              r.offers.map((o) => ({
+                title: `${o.operator} - ${o.offerName}`,
+                category: 'energy' as const,
+                conditions: [o.type, o.segment, o.commodity, o.url].filter(Boolean).join(' | '),
+                cost: o.fixedFeeEur,
+                targetSegments: inferOfferSegments('energy'),
+              }))
+            ),
+            ...telcoResults.flatMap((r) =>
+              r.offers.map((o) => ({
+                title: `${o.operator} - ${o.offerName}`,
+                category: 'connectivity' as const,
+                conditions: [o.serviceType, o.url].filter(Boolean).join(' | '),
+                cost: o.monthlyPriceEur,
+                targetSegments: inferOfferSegments('connectivity'),
+              }))
+            ),
+          ];
+
+          const imported: string[] = [];
+          let failed = 0;
+          let processed = 0;
+
+          for (const cand of candidates) {
+            const key = normalize(cand.category, cand.title);
+            if (existing.has(key)) continue;
+            existing.add(key);
+            processed += 1;
+            if (imported.length >= maxOffers) break;
+            try {
+              await importPromoOffer(
+                state,
+                {
+                  title: cand.title,
+                  category: cand.category,
+                  conditions: cand.conditions,
+                  cost: cand.cost,
+                  targetSegments: cand.targetSegments,
+                },
+                'events-ingest-public-offers'
+              );
+              imported.push(cand.title);
+              ctx.progress(35 + Math.round((imported.length / Math.max(1, maxOffers)) * 60));
+            } catch {
+              failed += 1;
+            }
+          }
+
+          if (failed > 0 && cfg.autoFix) {
+            const note = await maybeAdvisorNote(state, 'ingest.public-offers', `fallimenti: ${failed}`);
+            ctx.log('warn', 'advisor', note, { failed });
+          }
+
+          ctx.log('info', 'import', `Importate ${imported.length} offerte nuove (${failed} fallite).`, {
+            imported: imported.length,
+            failed,
+            processed,
+          });
+          ctx.summary(`Ingest offerte pubbliche completato: ${imported.length} nuove offerte`);
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          const note = await maybeAdvisorNote(state, 'ingest.public-offers', message);
+          ctx.log('error', 'import', message);
+          ctx.log('warn', 'advisor', note);
+          throw error;
+        }
+      },
+      'outbound.dispatch.approved': async (ctx, cfg) => {
+        ctx.log('info', 'start', 'Avvio dispatch automatico outbox approvati.');
+        ctx.progress(5);
+        const candidates = state.drafts.list().filter((i) => i.status === 'approved');
+        if (!candidates.length) {
+          ctx.log('info', 'scan', 'Nessun elemento approved da inviare.');
+          ctx.summary('Nessun outbox approved in coda');
+          ctx.progress(100);
+          return;
+        }
+
+        let sent = 0;
+        let failed = 0;
+        for (let i = 0; i < candidates.length; i++) {
+          const item = candidates[i];
+          try {
+            const dispatch = await dispatchDraft(state, item.draft, 'system');
+            const updated = state.drafts.update(item.id, {
+              status: dispatch.status,
+              externalId: dispatch.externalId,
+              sentAt: new Date().toISOString(),
+            });
+            if (updated) void state.postgresMirror.saveOutbox([updated]);
+            sent += 1;
+          } catch (error) {
+            failed += 1;
+            ctx.log('warn', 'dispatch', `Invio fallito per ${item.id}`, {
+              error: error instanceof Error ? error.message : String(error),
+            });
+          }
+          ctx.progress(10 + Math.round(((i + 1) / candidates.length) * 85));
+        }
+        if (failed > 0 && cfg.autoFix) {
+          const note = await maybeAdvisorNote(state, 'outbound.dispatch.approved', `fallimenti: ${failed}`);
+          ctx.log('warn', 'advisor', note, { failed });
+        }
+        ctx.log('info', 'done', `Dispatch completato: ${sent} inviati, ${failed} falliti.`);
+        ctx.summary(`Dispatch approved completato: ${sent} inviati`);
+      },
+    },
+    makeId,
+  });
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   void (app as any).register(cors, {
     origin: true,
@@ -954,40 +1284,43 @@ export function buildServer(state = buildState()) {
       'BISPCRM_AUTO_LOAD_RUNTIME',
       /^(postgres|hybrid)$/i.test(process.env.BISPCRM_PERSISTENCE_MODE ?? 'memory')
     );
-    if (!shouldAutoLoad) return;
-    const [customers, tickets, offers, objectives, tasks, outbox, campaigns, settings] = await Promise.all([
-      state.postgresMirror.loadCustomers(),
-      state.postgresMirror.loadTickets(),
-      state.postgresMirror.loadOffers(),
-      state.postgresMirror.loadObjectives(),
-      state.postgresMirror.loadTasks(),
-      state.postgresMirror.loadOutbox(),
-      state.postgresMirror.loadCampaigns(),
-      state.postgresMirror.loadAdminSettings(),
-    ]);
-    if (customers.length) state.customers.replaceAll(customers);
-    if (tickets.length) state.assistance.replaceAll(tickets);
-    if (offers.length) state.offers.replaceAll(offers);
-    if (objectives.length) state.objectives.replaceAll(objectives);
-    if (tasks.length) state.tasks.replaceAll(tasks);
-    if (outbox.length) state.drafts.replaceAll(outbox);
-    if (campaigns.length) state.campaigns.replaceAll(campaigns);
-    if (settings.length) state.adminSettings.replaceAll(settings);
-    state.rag = buildRagStore(state.customers.list(), state.offers.listActive());
-    state.audit.write(
-      makeAuditRecord('system', 'db.auto_load_runtime', {
-        customers: customers.length,
-        tickets: tickets.length,
-        offers: offers.length,
-        objectives: objectives.length,
-        tasks: tasks.length,
-        outbox: outbox.length,
-        campaigns: campaigns.length,
-        settings: settings.length,
-      })
-    );
+    if (shouldAutoLoad) {
+      const [customers, tickets, offers, objectives, tasks, outbox, campaigns, settings] = await Promise.all([
+        state.postgresMirror.loadCustomers(),
+        state.postgresMirror.loadTickets(),
+        state.postgresMirror.loadOffers(),
+        state.postgresMirror.loadObjectives(),
+        state.postgresMirror.loadTasks(),
+        state.postgresMirror.loadOutbox(),
+        state.postgresMirror.loadCampaigns(),
+        state.postgresMirror.loadAdminSettings(),
+      ]);
+      if (customers.length) state.customers.replaceAll(customers);
+      if (tickets.length) state.assistance.replaceAll(tickets);
+      if (offers.length) state.offers.replaceAll(offers);
+      if (objectives.length) state.objectives.replaceAll(objectives);
+      if (tasks.length) state.tasks.replaceAll(tasks);
+      if (outbox.length) state.drafts.replaceAll(outbox);
+      if (campaigns.length) state.campaigns.replaceAll(campaigns);
+      if (settings.length) state.adminSettings.replaceAll(settings);
+      state.rag = buildRagStore(state.customers.list(), state.offers.listActive());
+      state.audit.write(
+        makeAuditRecord('system', 'db.auto_load_runtime', {
+          customers: customers.length,
+          tickets: tickets.length,
+          offers: offers.length,
+          objectives: objectives.length,
+          tasks: tasks.length,
+          outbox: outbox.length,
+          campaigns: campaigns.length,
+          settings: settings.length,
+        })
+      );
+    }
+    eventRuntime.reschedule((type, trigger) => eventRuntime.trigger(type, trigger));
   });
   app.addHook('onClose', async () => {
+    eventRuntime.shutdown();
     if (envFlag('BISPCRM_AUTO_SYNC_ON_CLOSE', false)) {
       await Promise.all(state.customers.list().map((c) => state.postgresMirror.saveCustomer(c)));
       await Promise.all(state.assistance.list().map((t) => state.postgresMirror.saveTicket(t)));
@@ -2033,50 +2366,7 @@ export function buildServer(state = buildState()) {
     };
   });
 
-  app.post('/api/ingest/danea/sync', async () => {
-    const invoices = state.danea.listRecentInvoices();
-    const results = [];
-    for (const invoice of invoices) {
-      for (const line of invoice.lines) {
-        const title = line.description;
-        const offerId = makeId('offer');
-        const category: ProductOffer['category'] = /oppo|iphone|samsung|smartphone/i.test(title)
-          ? 'smartphone'
-          : /fibra|router|mesh/i.test(title)
-            ? 'connectivity'
-            : 'hardware';
-        const offer: ProductOffer = {
-          id: offerId,
-          sourceType: 'invoice',
-          category,
-          title,
-          cost: line.unitCost,
-          suggestedPrice: Math.round(line.unitCost * 1.18),
-          marginPct: 18,
-          stockQty: line.qty,
-          targetSegments: category === 'hardware' ? ['gamer'] : category === 'smartphone' ? ['smartphone-upgrade', 'famiglia'] : ['fibra', 'gamer'],
-          active: true,
-        };
-        state.offers.upsert(offer);
-        void state.postgresMirror.saveOffer(offer);
-        state.rag.add({ id: `offer:${offer.id}`, text: `${offer.title}. costo ${offer.cost}. prezzo suggerito ${offer.suggestedPrice}.` });
-        const event: DomainEvent = {
-          id: makeId('evt'),
-          type: 'danea.invoice.ingested',
-          occurredAt: invoice.receivedAt,
-          payload: { invoiceId: invoice.id, lines: invoice.lines },
-        };
-        if (envFlag('BISPCRM_QUEUE_ORCHESTRATOR_EVENTS', false)) {
-          void state.queueGateway.enqueueOrchestrator(event);
-        }
-        const output = state.orchestrator.run({ event, activeObjectives: state.objectives.listActive(), activeOffers: state.offers.listActive(), now: new Date().toISOString() });
-        persistOperationalOutput(state, output);
-        state.audit.write(makeAuditRecord('ingest-danea', 'invoice.synced', { invoiceId: invoice.id, offerId, line: title }));
-        results.push({ invoiceId: invoice.id, offer });
-      }
-    }
-    return { synced: results.length, results };
-  });
+  app.post('/api/ingest/danea/sync', async () => syncDaneaOffers(state, 'ingest-danea'));
   app.get<{ Querystring: { kind?: 'danea' | 'promo' } }>('/api/ingest/history', async (req) => {
     const type = req.query.kind === 'promo'
       ? 'promo.ingested'
@@ -2084,7 +2374,7 @@ export function buildServer(state = buildState()) {
         ? 'invoice.synced'
         : undefined;
     const records = state.audit.list().filter((r) => {
-      if (r.actor !== 'ingest-danea' && r.actor !== 'ingest-promo') return false;
+      if (!['ingest-danea', 'ingest-promo', 'events-ingest-danea', 'events-ingest-public-offers'].includes(r.actor)) return false;
       return type ? r.type.endsWith(type) : true;
     });
     return records.slice(-200).reverse();
@@ -2093,37 +2383,73 @@ export function buildServer(state = buildState()) {
   app.post<{ Body: { title: string; category?: ProductOffer['category']; conditions?: string; stockQty?: number; cost?: number; targetSegments?: Segment[] } }>(
     '/api/ingest/promo',
     async (req, reply) => {
-      const offer: ProductOffer = {
-        id: makeId('offer'),
-        sourceType: 'promo',
-        category: req.body.category ?? 'smartphone',
-        title: req.body.title,
-        conditions: req.body.conditions,
-        cost: req.body.cost,
-        suggestedPrice: req.body.cost ? Math.round(req.body.cost * 1.15) : undefined,
-        marginPct: req.body.cost ? 15 : undefined,
-        stockQty: req.body.stockQty ?? 10,
-        targetSegments: req.body.targetSegments ?? ['smartphone-upgrade'],
-        active: true,
-      };
-      state.offers.upsert(offer);
-      void state.postgresMirror.saveOffer(offer);
-      state.rag.add({ id: `offer:${offer.id}`, text: `${offer.title}. ${offer.conditions ?? ''}` });
-      const event: DomainEvent = {
-        id: makeId('evt'),
-        type: 'offer.promo.ingested',
-        occurredAt: new Date().toISOString(),
-        payload: { offerId: offer.id, title: offer.title, conditions: offer.conditions },
-      };
-      if (envFlag('BISPCRM_QUEUE_ORCHESTRATOR_EVENTS', false)) {
-        void state.queueGateway.enqueueOrchestrator(event);
-      }
-      const output = state.orchestrator.run({ event, activeObjectives: state.objectives.listActive(), activeOffers: state.offers.listActive(), now: new Date().toISOString() });
-      persistOperationalOutput(state, output);
-      state.audit.write(makeAuditRecord('ingest-promo', 'promo.ingested', { offerId: offer.id, title: offer.title }));
-      return reply.code(201).send({ offer, orchestrator: output });
+      const imported = await importPromoOffer(
+        state,
+        {
+          title: req.body.title,
+          category: req.body.category ?? 'smartphone',
+          conditions: req.body.conditions,
+          cost: req.body.cost,
+          targetSegments: req.body.targetSegments,
+        },
+        'ingest-promo'
+      );
+      return reply.code(201).send(imported);
     }
   );
+
+  app.get('/api/events/config', async (req, reply) => {
+    if (ensurePermission(req, reply, 'kpi:read') === null) return;
+    const status = Object.fromEntries(
+      eventCycleTypes.map((type) => [type, { running: eventRuntime.isRunning(type) }])
+    );
+    return { items: eventRuntime.listConfigs(), status };
+  });
+
+  app.patch<{
+    Params: { type: EventCycleType };
+    Body: Partial<{ enabled: boolean; intervalSec: number; autoFix: boolean; persist: boolean }>;
+  }>('/api/events/config/:type', async (req, reply) => {
+    if (ensurePermission(req, reply, 'settings:write') === null) return;
+    const type = req.params.type;
+    if (!eventCycleTypes.includes(type)) {
+      return reply.code(404).send({ error: 'Unknown event cycle', type });
+    }
+    const updated = eventRuntime.updateConfig(type, req.body);
+    persistEventConfig(type, updated);
+    if (req.body.persist !== false) state.adminSettings.persist();
+    eventRuntime.reschedule((cycleType, trigger) => eventRuntime.trigger(cycleType, trigger));
+    state.audit.write(makeAuditRecord('events', 'cycle.config.updated', { type, config: updated }));
+    return { type, config: updated };
+  });
+
+  app.get<{ Querystring: { type?: EventCycleType; limit?: string } }>('/api/events/runs', async (req, reply) => {
+    if (ensurePermission(req, reply, 'kpi:read') === null) return;
+    const type = req.query.type && eventCycleTypes.includes(req.query.type) ? req.query.type : undefined;
+    const limit = req.query.limit ? Number(req.query.limit) : undefined;
+    return eventRuntime.listRuns({ type, limit });
+  });
+
+  app.get<{ Params: { runId: string } }>('/api/events/runs/:runId', async (req, reply) => {
+    if (ensurePermission(req, reply, 'kpi:read') === null) return;
+    const run = eventRuntime.getRun(req.params.runId);
+    if (!run) return reply.code(404).send({ error: 'Event run not found' });
+    return run;
+  });
+
+  app.post<{ Body: { type: EventCycleType } }>('/api/events/run', async (req, reply) => {
+    if (ensurePermission(req, reply, 'campaigns:manage') === null) return;
+    const type = req.body.type;
+    if (!eventCycleTypes.includes(type)) return reply.code(400).send({ error: 'Unknown event cycle', type });
+    try {
+      const run = await eventRuntime.trigger(type, 'manual');
+      state.audit.write(makeAuditRecord('events', 'cycle.manual.triggered', { type, runId: run.id, status: run.status }));
+      return reply.code(202).send(run);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      return reply.code(409).send({ error: message, type });
+    }
+  });
 
   app.post<{ Body: { offerId?: string; offerTitle?: string; segment?: Segment; includeOneToOne?: boolean; includeOneToMany?: boolean } }>('/api/campaigns/preview', async (req, reply) => {
     const offer = resolveOfferFromRequest(state, req.body);

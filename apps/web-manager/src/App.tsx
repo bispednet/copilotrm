@@ -12,6 +12,7 @@ type Page =
   | 'campaigns'
   | 'swarm'
   | 'content'
+  | 'events'
   | 'outbox'
   | 'ceo'
   | 'admin'
@@ -76,6 +77,21 @@ type SwarmStep = { id: string; agent: string; stepNo: number; status: string; ta
 type SwarmMessage = { id: string; fromAgent: string; toAgent?: string; kind: string; content: string; confidence?: number; createdAt: string };
 type SwarmHandoff = { id: string; fromAgent: string; toAgent: string; reason: string; blocking: boolean; requiresApproval: boolean; status: string };
 type SwarmDetail = { run: SwarmRun; steps: SwarmStep[]; messages: SwarmMessage[]; handoffs: SwarmHandoff[] };
+type EventCycleType = 'ingest.danea' | 'ingest.public-offers' | 'outbound.dispatch.approved';
+type EventCycleConfig = { enabled: boolean; intervalSec: number; autoFix: boolean };
+type EventCycleConfigItem = { type: EventCycleType; config: EventCycleConfig };
+type EventCycleRunLog = { ts: string; level: 'info' | 'warn' | 'error'; step: string; message: string; details?: Record<string, unknown> };
+type EventCycleRun = {
+  id: string;
+  type: EventCycleType;
+  status: 'running' | 'completed' | 'failed';
+  triggeredBy: 'manual' | 'scheduler';
+  startedAt: string;
+  endedAt?: string;
+  progress: number;
+  summary?: string;
+  logs: EventCycleRunLog[];
+};
 
 function csvToList(value: string): string[] {
   return value.split(',').map((x) => x.trim()).filter(Boolean);
@@ -137,6 +153,11 @@ function App() {
   const [promoCategory, setPromoCategory] = useState<'smartphone' | 'hardware' | 'connectivity' | 'accessory' | 'energy'>('smartphone');
   const [promoSegments, setPromoSegments] = useState('smartphone-upgrade,famiglia');
   const [ingestResult, setIngestResult] = useState<Record<string, unknown> | null>(null);
+  const [eventConfigs, setEventConfigs] = useState<EventCycleConfigItem[]>([]);
+  const [eventRuns, setEventRuns] = useState<EventCycleRun[]>([]);
+  const [selectedEventType, setSelectedEventType] = useState<EventCycleType>('ingest.public-offers');
+  const [selectedEventRunId, setSelectedEventRunId] = useState<string | null>(null);
+  const [selectedEventRun, setSelectedEventRun] = useState<EventCycleRun | null>(null);
 
   const [scenarioName, setScenarioName] = useState('smartphonePromo');
   const [scenarioResult, setScenarioResult] = useState<Record<string, unknown> | null>(null);
@@ -210,6 +231,16 @@ function App() {
     if (found) setCharacterDraft(found);
   }, [selectedCharacterKey, characters]);
 
+  useEffect(() => {
+    if (page !== 'events') return;
+    void refreshEvents(selectedEventType);
+    const timer = window.setInterval(() => {
+      void refreshEvents(selectedEventType);
+      if (selectedEventRunId) void loadEventRun(selectedEventRunId);
+    }, 2500);
+    return () => window.clearInterval(timer);
+  }, [page, selectedEventType, selectedEventRunId]); // eslint-disable-line react-hooks/exhaustive-deps
+
   async function runAction(label: string, fn: () => Promise<void>): Promise<void> {
     setBusy(true);
     try {
@@ -246,6 +277,19 @@ function App() {
     if (selectedCardId === cardId) setSelectedCardId(null);
   }
 
+  async function refreshEvents(type?: EventCycleType): Promise<void> {
+    const cfg = await apiFetch('/api/events/config').then((r) => r.json());
+    const runs = await apiFetch(`/api/events/runs?limit=80${type ? `&type=${encodeURIComponent(type)}` : ''}`).then((r) => r.json());
+    setEventConfigs(Array.isArray(cfg?.items) ? cfg.items : []);
+    setEventRuns(Array.isArray(runs) ? runs : []);
+  }
+
+  async function loadEventRun(runId: string): Promise<void> {
+    const run = await apiFetch(`/api/events/runs/${runId}`).then((r) => r.json());
+    setSelectedEventRun(run ?? null);
+    setSelectedEventRunId(runId);
+  }
+
   const nav: Array<{ key: Page; label: string }> = [
     { key: 'home', label: 'Home / KPI' },
     { key: 'datahub', label: 'Data Hub 360' },
@@ -254,6 +298,7 @@ function App() {
     { key: 'campaigns', label: 'Campaigns' },
     { key: 'swarm', label: 'Swarm Studio' },
     { key: 'content', label: 'Content Cards' },
+    { key: 'events', label: 'Eventi / Scheduler' },
     { key: 'ingest', label: 'Ingest / Stock' },
     { key: 'outbox', label: 'Outbox / Approvals' },
     { key: 'ceo', label: 'CEO Objectives' },
@@ -261,6 +306,11 @@ function App() {
     { key: 'characters', label: 'Character Studio' },
     { key: 'infra', label: 'Infra / Queue' },
   ];
+  const eventLabels: Record<EventCycleType, string> = {
+    'ingest.danea': 'Ingest Danea',
+    'ingest.public-offers': 'Ingest offerte luce/TLC',
+    'outbound.dispatch.approved': 'Outbound approved',
+  };
 
   return (
     <>
@@ -328,6 +378,7 @@ function App() {
               {page === 'campaigns' && 'Pianificazione e lancio campagne'}
               {page === 'swarm' && 'Visibilita run agentiche e handoff'}
               {page === 'content' && 'Pipeline contenuti e approvazioni'}
+              {page === 'events' && 'Control room eventi, cicli e progressione real-time'}
               {page === 'ingest' && 'Ingest dati promo/stock'}
               {page === 'outbox' && 'Moderazione invii multicanale'}
               {page === 'ceo' && 'Obiettivi e leve strategiche'}
@@ -345,7 +396,8 @@ function App() {
               {page === 'home' && 'Verifica KPI e ultime run, poi apri Swarm o Outbox per agire.'}
               {page === 'ceo' && 'Inserisci obiettivo e offerte preferite per orientare l’orchestrator.'}
               {page === 'admin' && 'Conferma variabili integrazione e salva solo parametri validati.'}
-              {!['home', 'ceo', 'admin'].includes(page) && 'Completa il task della pagina e torna su Home per monitorare l’impatto.'}
+              {page === 'events' && 'Configura timer e trigger manuali, poi segui il log passo-passo di ogni ciclo.'}
+              {!['home', 'ceo', 'admin', 'events'].includes(page) && 'Completa il task della pagina e torna su Home per monitorare l’impatto.'}
             </p>
           </div>
         </header>
@@ -743,6 +795,146 @@ function App() {
                   <h3>Swarm output scenario</h3>
                   <pre>{JSON.stringify(scenarioResult ?? {}, null, 2)}</pre>
                 </>
+              )}
+            </article>
+          </section>
+        )}
+
+        {page === 'events' && (
+          <section className="grid twoCols">
+            <article className="card">
+              <h2>Eventi & Scheduler</h2>
+              <p className="lede">Controlla i cicli automatici, attivali/disattivali e avviali manualmente con log operativo.</p>
+              <div className="btnRow" style={{ marginBottom: 12 }}>
+                <button onClick={() => void runAction('events.refresh', () => refreshEvents(selectedEventType))} disabled={busy}>Aggiorna</button>
+              </div>
+              {eventConfigs.map((item) => (
+                <div key={item.type} style={{ border: '1px solid var(--line)', borderRadius: 10, padding: 10, marginBottom: 10 }}>
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10 }}>
+                    <strong>{eventLabels[item.type]}</strong>
+                    <span className="muted" style={{ fontSize: 12 }}>{item.type}</span>
+                  </div>
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, minmax(90px, 1fr))', gap: 8, marginTop: 8 }}>
+                    <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12 }}>
+                      <input
+                        type="checkbox"
+                        checked={item.config.enabled}
+                        onChange={(e) => setEventConfigs((prev) => prev.map((x) => x.type === item.type ? { ...x, config: { ...x.config, enabled: e.target.checked } } : x))}
+                      />
+                      enabled
+                    </label>
+                    <label style={{ fontSize: 12 }}>
+                      interval (sec)
+                      <input
+                        type="number"
+                        min={15}
+                        value={item.config.intervalSec}
+                        onChange={(e) => setEventConfigs((prev) => prev.map((x) => x.type === item.type ? { ...x, config: { ...x.config, intervalSec: Number(e.target.value) || x.config.intervalSec } } : x))}
+                      />
+                    </label>
+                    <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12 }}>
+                      <input
+                        type="checkbox"
+                        checked={item.config.autoFix}
+                        onChange={(e) => setEventConfigs((prev) => prev.map((x) => x.type === item.type ? { ...x, config: { ...x.config, autoFix: e.target.checked } } : x))}
+                      />
+                      auto-fix
+                    </label>
+                  </div>
+                  <div className="btnRow" style={{ marginTop: 8 }}>
+                    <button
+                      className="ghost"
+                      onClick={() =>
+                        void runAction(`events.config.${item.type}`, async () => {
+                          await apiFetch(`/api/events/config/${encodeURIComponent(item.type)}`, {
+                            method: 'PATCH',
+                            headers: { 'content-type': 'application/json' },
+                            body: JSON.stringify({ ...item.config, persist: true }),
+                          });
+                          await refreshEvents(selectedEventType);
+                        })
+                      }
+                      disabled={busy}
+                    >
+                      Salva
+                    </button>
+                    <button
+                      onClick={() =>
+                        void runAction(`events.run.${item.type}`, async () => {
+                          const run = await apiFetch('/api/events/run', {
+                            method: 'POST',
+                            headers: { 'content-type': 'application/json' },
+                            body: JSON.stringify({ type: item.type }),
+                          }).then((r) => r.json());
+                          if (run?.id) {
+                            setSelectedEventType(item.type);
+                            setSelectedEventRunId(run.id);
+                            setSelectedEventRun(run);
+                          }
+                          await refreshEvents(item.type);
+                        })
+                      }
+                      disabled={busy}
+                    >
+                      Esegui ora
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </article>
+
+            <article className="card">
+              <h2>Log eventi</h2>
+              <label>Filtro ciclo</label>
+              <select value={selectedEventType} onChange={(e) => { setSelectedEventType(e.target.value as EventCycleType); setSelectedEventRunId(null); setSelectedEventRun(null); }}>
+                {Object.entries(eventLabels).map(([k, v]) => (
+                  <option key={k} value={k}>{v}</option>
+                ))}
+              </select>
+              <div className="tableWrap" style={{ marginTop: 10 }}>
+                <table>
+                  <thead><tr><th>Stato</th><th>Trigger</th><th>Progress</th><th>Avvio</th><th></th></tr></thead>
+                  <tbody>
+                    {eventRuns.filter((r) => r.type === selectedEventType).map((run) => (
+                      <tr key={run.id}>
+                        <td>{run.status}</td>
+                        <td>{run.triggeredBy}</td>
+                        <td>{run.progress}%</td>
+                        <td>{new Date(run.startedAt).toLocaleTimeString('it-IT')}</td>
+                        <td><button className="ghost" onClick={() => void loadEventRun(run.id)}>Dettaglio</button></td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+
+              {!selectedEventRun && <p className="muted" style={{ marginTop: 10 }}>Seleziona una run per vedere messaggi passo-passo.</p>}
+              {selectedEventRun && (
+                <div style={{ marginTop: 12 }}>
+                  <h3 style={{ marginBottom: 8 }}>{eventLabels[selectedEventRun.type]} · {selectedEventRun.status}</h3>
+                  <div style={{ width: '100%', height: 10, background: 'var(--line)', borderRadius: 999, overflow: 'hidden', marginBottom: 8 }}>
+                    <div style={{ width: `${Math.max(0, Math.min(100, selectedEventRun.progress))}%`, height: '100%', background: 'var(--accent)' }} />
+                  </div>
+                  <p className="muted" style={{ fontSize: 12, marginBottom: 10 }}>{selectedEventRun.summary ?? 'In corso...'}</p>
+                  <div style={{ maxHeight: 360, overflowY: 'auto', border: '1px solid var(--line)', borderRadius: 8, padding: 8 }}>
+                    {selectedEventRun.logs.map((l, idx) => (
+                      <div key={`${l.ts}-${idx}`} style={{ padding: '6px 0', borderBottom: '1px solid var(--line)' }}>
+                        <div style={{ display: 'flex', gap: 8, alignItems: 'center', fontSize: 12 }}>
+                          <span style={{ fontWeight: 700, color: l.level === 'error' ? '#ef4444' : l.level === 'warn' ? '#f59e0b' : '#22c55e' }}>{l.level}</span>
+                          <span className="muted">{new Date(l.ts).toLocaleTimeString('it-IT')}</span>
+                          <span style={{ fontFamily: 'monospace' }}>{l.step}</span>
+                        </div>
+                        <div style={{ marginTop: 4 }}>{l.message}</div>
+                        {l.details && (
+                          <details>
+                            <summary className="muted" style={{ cursor: 'pointer', fontSize: 12 }}>Dettagli tecnici</summary>
+                            <pre>{JSON.stringify(l.details, null, 2)}</pre>
+                          </details>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                </div>
               )}
             </article>
           </section>
