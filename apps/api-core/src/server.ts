@@ -279,7 +279,9 @@ function normalizeEnergyCandidate(input: {
   variablePriceCent?: number;
   url?: string;
   offerCode?: string;
-}): { title: string; conditions: string; cost?: number; family: string } | null {
+  validFrom?: string;
+  validTo?: string;
+}): { title: string; conditions: string; cost?: number; family: string; validFrom?: string; expiresAt?: string } | null {
   if (!isMeaningfulOfferName(input.offerName)) return null;
   const commodity = input.commodity === 'gas' ? 'gas' : input.commodity === 'dual' ? 'dual' : 'electricity';
   const offerKind = input.type?.toUpperCase() === 'PLACET' ? 'PLACET' : input.type?.toUpperCase() === 'MLIBERO' ? 'Mercato Libero' : 'Offerta';
@@ -302,6 +304,8 @@ function normalizeEnergyCandidate(input: {
     conditions: parts.join(' | '),
     cost: input.fixedFeeEur,
     family: commodity === 'gas' ? 'energy-gas' : commodity === 'dual' ? 'energy-dual' : 'energy-electricity',
+    validFrom: input.validFrom,
+    expiresAt: input.validTo,
   };
 }
 
@@ -314,7 +318,9 @@ function normalizeTelcoCandidate(input: {
   dataUnlimited?: boolean;
   minutesUnlimited?: boolean;
   url?: string;
-}): { title: string; conditions: string; cost?: number; family: string } | null {
+  promoUntil?: string;
+  contractDurationMonths?: number;
+}): { title: string; conditions: string; cost?: number; family: string; expiresAt?: string; durationMonths?: number } | null {
   if (!isMeaningfulOfferName(input.offerName)) return null;
   const operator = input.operator?.trim() || 'Operatore';
   const svc = (input.serviceType ?? '').toLowerCase();
@@ -334,6 +340,8 @@ function normalizeTelcoCandidate(input: {
     conditions: parts.join(' | '),
     cost: input.monthlyPriceEur,
     family,
+    expiresAt: input.promoUntil,
+    durationMonths: input.contractDurationMonths,
   };
 }
 
@@ -392,7 +400,18 @@ async function maybeAdvisorNote(state: ApiState, context: string, errorMessage: 
 
 async function importPromoOffer(
   state: ApiState,
-  params: { title: string; category: ProductOffer['category']; conditions?: string; cost?: number; targetSegments?: Segment[] },
+  params: {
+    title: string;
+    category: ProductOffer['category'];
+    conditions?: string;
+    cost?: number;
+    targetSegments?: Segment[];
+    commissionPct?: number;
+    commissionEur?: number;
+    validFrom?: string;
+    expiresAt?: string;
+    durationMonths?: number;
+  },
   actor: string
 ): Promise<{ offer: ProductOffer; orchestrator: { tasks: number; drafts: number } }> {
   const offer: ProductOffer = {
@@ -404,7 +423,12 @@ async function importPromoOffer(
     cost: params.cost,
     suggestedPrice: params.cost ? Math.round(params.cost * 1.15) : undefined,
     marginPct: params.cost ? 15 : undefined,
+    commissionPct: params.commissionPct,
+    commissionEur: params.commissionEur,
     stockQty: 10,
+    validFrom: params.validFrom,
+    expiresAt: params.expiresAt,
+    durationMonths: params.durationMonths,
     targetSegments: params.targetSegments ?? inferOfferSegments(params.category),
     active: true,
   };
@@ -520,6 +544,9 @@ async function ingestPublicOffers(
     category: ProductOffer['category'];
     conditions: string;
     cost?: number;
+    validFrom?: string;
+    expiresAt?: string;
+    durationMonths?: number;
     targetSegments: Segment[];
     family: string;
   }> = [];
@@ -536,6 +563,8 @@ async function ingestPublicOffers(
         variablePriceCent: o.variablePriceCent,
         offerCode: o.offerCode,
         url: o.url,
+        validFrom: o.validFrom,
+        validTo: o.validTo,
       });
       if (!norm) return;
       candidates.push({
@@ -543,6 +572,8 @@ async function ingestPublicOffers(
         category: 'energy',
         conditions: norm.conditions,
         cost: norm.cost,
+        validFrom: norm.validFrom,
+        expiresAt: norm.expiresAt,
         targetSegments: inferOfferSegments('energy'),
         family: norm.family,
       });
@@ -560,6 +591,8 @@ async function ingestPublicOffers(
         dataUnlimited: o.dataUnlimited,
         minutesUnlimited: o.minutesUnlimited,
         url: o.url,
+        promoUntil: o.promoUntil,
+        contractDurationMonths: o.contractDurationMonths,
       });
       if (!norm) return;
       candidates.push({
@@ -567,6 +600,8 @@ async function ingestPublicOffers(
         category: 'connectivity',
         conditions: norm.conditions,
         cost: norm.cost,
+        expiresAt: norm.expiresAt,
+        durationMonths: norm.durationMonths,
         targetSegments: inferOfferSegments('connectivity'),
         family: norm.family,
       });
@@ -602,6 +637,9 @@ async function ingestPublicOffers(
         category: cand.category,
         conditions: cand.conditions,
         cost: cand.cost,
+        validFrom: cand.validFrom,
+        expiresAt: cand.expiresAt,
+        durationMonths: cand.durationMonths,
         targetSegments: cand.targetSegments,
       },
       actor
@@ -1702,14 +1740,41 @@ export function buildServer(state = buildState()) {
     return { q, customers, offers };
   });
   app.get('/api/assist/tickets', async () => state.assistance.list());
-  app.get<{ Querystring: { category?: ProductOffer['category']; q?: string } }>('/api/offers', async (req) => {
-    let offers = state.offers.listActive();
+  app.get<{ Querystring: { category?: ProductOffer['category']; q?: string; includeInactive?: 'true' | 'false' } }>('/api/offers', async (req) => {
+    let offers = req.query.includeInactive === 'true' ? state.offers.listAll() : state.offers.listActive();
     if (req.query.category) offers = offers.filter((o) => o.category === req.query.category);
     if (req.query.q) {
       const q = req.query.q.toLowerCase();
       offers = offers.filter((o) => o.title.toLowerCase().includes(q));
     }
     return offers;
+  });
+  app.patch<{
+    Params: { offerId: string };
+    Body: Partial<Pick<ProductOffer, 'title' | 'category' | 'conditions' | 'cost' | 'suggestedPrice' | 'marginPct' | 'commissionPct' | 'commissionEur' | 'stockQty' | 'validFrom' | 'expiresAt' | 'durationMonths' | 'targetSegments' | 'active'>>;
+  }>('/api/offers/:offerId', async (req, reply) => {
+    if (ensurePermission(req, reply, 'campaigns:manage') === null) return;
+    const current = state.offers.getById(req.params.offerId);
+    if (!current) return reply.code(404).send({ error: 'Offer not found' });
+    const merged: ProductOffer = {
+      ...current,
+      ...req.body,
+      targetSegments: req.body.targetSegments ?? current.targetSegments,
+    };
+    state.offers.upsert(merged);
+    void state.postgresMirror.saveOffer(merged);
+    state.audit.write(makeAuditRecord('offer-admin', 'offer.updated', { offerId: merged.id, patch: req.body }));
+    return merged;
+  });
+  app.delete<{ Params: { offerId: string } }>('/api/offers/:offerId', async (req, reply) => {
+    if (ensurePermission(req, reply, 'campaigns:manage') === null) return;
+    const current = state.offers.getById(req.params.offerId);
+    if (!current) return reply.code(404).send({ error: 'Offer not found' });
+    const deactivated: ProductOffer = { ...current, active: false };
+    state.offers.upsert(deactivated);
+    void state.postgresMirror.saveOffer(deactivated);
+    state.audit.write(makeAuditRecord('offer-admin', 'offer.deactivated', { offerId: current.id }));
+    return { ok: true, offerId: current.id, mode: 'soft-delete(active=false)' };
   });
   app.get('/api/objectives', async () => state.objectives.listActive());
   app.get<{ Querystring: { type?: string; actor?: string } }>('/api/audit', async (req) => {
@@ -2753,7 +2818,21 @@ export function buildServer(state = buildState()) {
     return items;
   });
 
-  app.post<{ Body: { title: string; category?: ProductOffer['category']; conditions?: string; stockQty?: number; cost?: number; targetSegments?: Segment[] } }>(
+  app.post<{
+    Body: {
+      title: string;
+      category?: ProductOffer['category'];
+      conditions?: string;
+      stockQty?: number;
+      cost?: number;
+      targetSegments?: Segment[];
+      commissionPct?: number;
+      commissionEur?: number;
+      validFrom?: string;
+      expiresAt?: string;
+      durationMonths?: number;
+    };
+  }>(
     '/api/ingest/promo',
     async (req, reply) => {
       const imported = await importPromoOffer(
@@ -2764,6 +2843,11 @@ export function buildServer(state = buildState()) {
           conditions: req.body.conditions,
           cost: req.body.cost,
           targetSegments: req.body.targetSegments,
+          commissionPct: req.body.commissionPct,
+          commissionEur: req.body.commissionEur,
+          validFrom: req.body.validFrom,
+          expiresAt: req.body.expiresAt,
+          durationMonths: req.body.durationMonths,
         },
         'ingest-promo'
       );

@@ -103,8 +103,12 @@ export interface ProductOffer {
   cost?: number;
   suggestedPrice?: number;
   marginPct?: number;
+  commissionPct?: number;
+  commissionEur?: number;
   stockQty?: number;
+  validFrom?: string;
   expiresAt?: string;
+  durationMonths?: number;
   targetSegments: Segment[];
   active: boolean;
 }

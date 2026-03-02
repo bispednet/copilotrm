@@ -7,7 +7,24 @@ const API = (import.meta as { env?: { VITE_API_BASE_URL?: string } }).env?.VITE_
 
 type Page = 'home' | 'customers' | 'offers' | 'consult' | 'campaigns' | 'chat';
 type Customer = { id: string; fullName: string; phone?: string; segments: string[]; interests?: string[] };
-type Offer = { id: string; title: string; category: string; targetSegments: string[]; active: boolean };
+type Offer = {
+  id: string;
+  title: string;
+  category: string;
+  sourceType?: string;
+  targetSegments: string[];
+  active: boolean;
+  conditions?: string;
+  cost?: number;
+  suggestedPrice?: number;
+  marginPct?: number;
+  commissionPct?: number;
+  commissionEur?: number;
+  stockQty?: number;
+  validFrom?: string;
+  expiresAt?: string;
+  durationMonths?: number;
+};
 type ConsultResult = {
   topOffer: Offer | null;
   variants: Array<{ tier: string; text: string }>;
@@ -56,6 +73,10 @@ const KIND_LABEL: Record<SwarmThreadMsg['kind'], string> = {
   synthesis: 'Sintesi',
 };
 
+function csvToList(value: string): string[] {
+  return value.split(',').map((x) => x.trim()).filter(Boolean);
+}
+
 // ── API helper ───────────────────────────────────────────────────────────────
 
 async function apiFetch(path: string, init?: RequestInit): Promise<Response> {
@@ -80,6 +101,8 @@ function App() {
   // Data
   const [customers, setCustomers] = useState<Customer[]>([]);
   const [offers, setOffers] = useState<Offer[]>([]);
+  const [selectedOfferId, setSelectedOfferId] = useState<string | null>(null);
+  const [offerDraft, setOfferDraft] = useState<Offer | null>(null);
   const [campaignOfferTitle, setCampaignOfferTitle] = useState('');
   const [campaignSegment, setCampaignSegment] = useState('smartphone-upgrade');
   const [campaignPreview, setCampaignPreview] = useState<Record<string, unknown> | null>(null);
@@ -152,6 +175,22 @@ function App() {
     setOffers(offerArr);
     if (!campaignOfferTitle && offerArr[0]?.title) setCampaignOfferTitle(offerArr[0].title);
   }, [campaignOfferTitle]);
+
+  useEffect(() => {
+    if (!offers.length) {
+      setSelectedOfferId(null);
+      setOfferDraft(null);
+      return;
+    }
+    const selected = selectedOfferId ? offers.find((o) => o.id === selectedOfferId) : offers[0];
+    if (!selected) {
+      setSelectedOfferId(offers[0].id);
+      setOfferDraft(offers[0]);
+      return;
+    }
+    setSelectedOfferId(selected.id);
+    setOfferDraft(selected);
+  }, [offers, selectedOfferId]);
 
   useEffect(() => {
     void refreshBase().catch((err) => showToast('err', `Caricamento: ${err instanceof Error ? err.message : String(err)}`));
@@ -442,27 +481,129 @@ function App() {
 
           {/* ── OFFERS ────────────────────────────────────────────── */}
           {page === 'offers' && (
-            <article className="card">
-              <h2>Offerte ({offers.length})</h2>
-              <div className="tableWrap">
-                <table>
-                  <thead>
-                    <tr><th>ID</th><th>Titolo</th><th>Categoria</th><th>Target</th><th>Attiva</th></tr>
-                  </thead>
-                  <tbody>
-                    {offers.map((o) => (
-                      <tr key={o.id}>
-                        <td><code>{o.id}</code></td>
-                        <td><strong>{o.title}</strong></td>
-                        <td>{o.category}</td>
-                        <td>{o.targetSegments.join(', ')}</td>
-                        <td>{o.active ? '✅' : '—'}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            </article>
+            <section className="grid twoCols">
+              <article className="card">
+                <h2>Offerte ({offers.length})</h2>
+                <p className="muted" style={{ fontSize: 12, marginBottom: 10 }}>Clicca una riga per aprire la scheda offerta.</p>
+                <div className="tableWrap">
+                  <table>
+                    <thead>
+                      <tr><th>ID</th><th>Titolo</th><th>Categoria</th><th>Provvigione</th><th>Attiva</th></tr>
+                    </thead>
+                    <tbody>
+                      {offers.map((o) => (
+                        <tr key={o.id} style={{ cursor: 'pointer', background: selectedOfferId === o.id ? 'var(--panel)' : undefined }} onClick={() => { setSelectedOfferId(o.id); setOfferDraft(o); }}>
+                          <td><code>{o.id}</code></td>
+                          <td><strong>{o.title}</strong></td>
+                          <td>{o.category}</td>
+                          <td>{o.commissionPct != null ? `${o.commissionPct}%` : o.commissionEur != null ? `${o.commissionEur}€` : '—'}</td>
+                          <td>{o.active ? '✅' : '—'}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </article>
+
+              <article className="card">
+                <h2>Scheda offerta</h2>
+                {!offerDraft && <p className="muted">Seleziona un’offerta per vedere i dettagli.</p>}
+                {offerDraft && (
+                  <>
+                    <label>ID</label>
+                    <input value={offerDraft.id} disabled />
+                    <label>Titolo</label>
+                    <input value={offerDraft.title} onChange={(e) => setOfferDraft({ ...offerDraft, title: e.target.value })} />
+                    <label>Categoria</label>
+                    <select value={offerDraft.category} onChange={(e) => setOfferDraft({ ...offerDraft, category: e.target.value })}>
+                      <option value="hardware">hardware</option>
+                      <option value="smartphone">smartphone</option>
+                      <option value="connectivity">connectivity</option>
+                      <option value="energy">energy</option>
+                      <option value="service">service</option>
+                      <option value="accessory">accessory</option>
+                    </select>
+                    <label>Target segmenti (csv)</label>
+                    <input value={offerDraft.targetSegments.join(',')} onChange={(e) => setOfferDraft({ ...offerDraft, targetSegments: csvToList(e.target.value) })} />
+                    <label>Condizioni</label>
+                    <textarea rows={3} value={offerDraft.conditions ?? ''} onChange={(e) => setOfferDraft({ ...offerDraft, conditions: e.target.value })} />
+                    <div className="grid twoCols" style={{ gap: 10 }}>
+                      <div>
+                        <label>Costo</label>
+                        <input type="number" value={offerDraft.cost ?? ''} onChange={(e) => setOfferDraft({ ...offerDraft, cost: e.target.value ? Number(e.target.value) : undefined })} />
+                      </div>
+                      <div>
+                        <label>Prezzo suggerito</label>
+                        <input type="number" value={offerDraft.suggestedPrice ?? ''} onChange={(e) => setOfferDraft({ ...offerDraft, suggestedPrice: e.target.value ? Number(e.target.value) : undefined })} />
+                      </div>
+                      <div>
+                        <label>Margine %</label>
+                        <input type="number" value={offerDraft.marginPct ?? ''} onChange={(e) => setOfferDraft({ ...offerDraft, marginPct: e.target.value ? Number(e.target.value) : undefined })} />
+                      </div>
+                      <div>
+                        <label>Provvigione %</label>
+                        <input type="number" value={offerDraft.commissionPct ?? ''} onChange={(e) => setOfferDraft({ ...offerDraft, commissionPct: e.target.value ? Number(e.target.value) : undefined })} />
+                      </div>
+                      <div>
+                        <label>Provvigione €</label>
+                        <input type="number" value={offerDraft.commissionEur ?? ''} onChange={(e) => setOfferDraft({ ...offerDraft, commissionEur: e.target.value ? Number(e.target.value) : undefined })} />
+                      </div>
+                      <div>
+                        <label>Stock</label>
+                        <input type="number" value={offerDraft.stockQty ?? ''} onChange={(e) => setOfferDraft({ ...offerDraft, stockQty: e.target.value ? Number(e.target.value) : undefined })} />
+                      </div>
+                      <div>
+                        <label>Validità dal</label>
+                        <input type="date" value={offerDraft.validFrom?.slice(0, 10) ?? ''} onChange={(e) => setOfferDraft({ ...offerDraft, validFrom: e.target.value ? new Date(`${e.target.value}T00:00:00.000Z`).toISOString() : undefined })} />
+                      </div>
+                      <div>
+                        <label>Scadenza</label>
+                        <input type="date" value={offerDraft.expiresAt?.slice(0, 10) ?? ''} onChange={(e) => setOfferDraft({ ...offerDraft, expiresAt: e.target.value ? new Date(`${e.target.value}T23:59:59.000Z`).toISOString() : undefined })} />
+                      </div>
+                      <div>
+                        <label>Durata (mesi)</label>
+                        <input type="number" value={offerDraft.durationMonths ?? ''} onChange={(e) => setOfferDraft({ ...offerDraft, durationMonths: e.target.value ? Number(e.target.value) : undefined })} />
+                      </div>
+                    </div>
+                    <label style={{ marginTop: 8 }}>
+                      <input
+                        type="checkbox"
+                        checked={offerDraft.active}
+                        onChange={(e) => setOfferDraft({ ...offerDraft, active: e.target.checked })}
+                        style={{ marginRight: 6 }}
+                      />
+                      Offerta attiva
+                    </label>
+                    <div className="btnRow" style={{ marginTop: 12 }}>
+                      <button
+                        disabled={busy}
+                        onClick={() => void runAction('Salva offerta', async () => {
+                          const res = await apiFetch(`/api/offers/${offerDraft.id}`, {
+                            method: 'PATCH',
+                            body: JSON.stringify(offerDraft),
+                          });
+                          if (!res.ok) throw new Error(`HTTP ${res.status}`);
+                          await refreshBase();
+                        })}
+                      >
+                        Salva modifiche
+                      </button>
+                      <button
+                        className="ghost"
+                        disabled={busy}
+                        onClick={() => void runAction('Disattiva offerta', async () => {
+                          const res = await apiFetch(`/api/offers/${offerDraft.id}`, { method: 'DELETE' });
+                          if (!res.ok) throw new Error(`HTTP ${res.status}`);
+                          await refreshBase();
+                        })}
+                      >
+                        Disattiva (cancella)
+                      </button>
+                    </div>
+                  </>
+                )}
+              </article>
+            </section>
           )}
 
           {/* ── CONSULT ───────────────────────────────────────────── */}
