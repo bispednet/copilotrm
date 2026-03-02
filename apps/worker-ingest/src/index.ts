@@ -1,12 +1,17 @@
 import IORedis from 'ioredis';
 import { Queue } from 'bullmq';
 import { DaneaReadOnlyStub } from '@bisp/integrations-danea';
+import { EnergyIngestService } from '@bisp/integrations-energy';
 import { fetchAllRssFeeds, RssStateTracker, rssItemToEvent, type RssSource } from '@bisp/integrations-rss';
+import { TelcoIngestService } from '@bisp/integrations-telco';
 import { logger } from '@bisp/shared-logger';
 
 const redisUrl = process.env.REDIS_URL ?? 'redis://localhost:6379';
 const queueMode = /^(redis|bullmq)$/i.test(process.env.BISPCRM_QUEUE_MODE ?? 'inline') ? 'redis' : 'inline';
+const apiCoreUrl = process.env.COPILOTRM_API_URL ?? process.env.API_CORE_URL ?? `http://localhost:${process.env.PORT_API_CORE ?? 4010}`;
 const danea = new DaneaReadOnlyStub();
+const energy = new EnergyIngestService();
+const telco = new TelcoIngestService();
 
 /**
  * Feed RSS da env var RSS_FEEDS (JSON array di RssSource) o defaults curati.
@@ -54,6 +59,101 @@ function getRssSources(): RssSource[] {
 }
 
 const rssTracker = new RssStateTracker();
+
+function envFlag(name: string, defaultValue = false): boolean {
+  const raw = process.env[name];
+  if (raw == null) return defaultValue;
+  return /^(1|true|yes|on)$/i.test(raw.trim());
+}
+
+function inferSegmentsByCategory(category: 'energy' | 'connectivity'): string[] {
+  if (category === 'energy') return ['famiglia', 'business'];
+  return ['fibra', 'famiglia', 'business'];
+}
+
+function csvEnvList(name: string): string[] {
+  const raw = process.env[name];
+  if (!raw) return [];
+  return raw.split(',').map((s) => s.trim()).filter(Boolean);
+}
+
+async function ingestPublicOffersViaApi(): Promise<{ imported: number; attempted: number }> {
+  if (!envFlag('BISPCRM_INGEST_PUBLIC_OFFERS', true)) return { imported: 0, attempted: 0 };
+
+  const role = process.env.BISPCRM_INGEST_ROLE ?? 'admin';
+  const timeoutMs = Number(process.env.BISPCRM_INGEST_API_TIMEOUT_MS ?? 8000);
+  const maxOffers = Math.max(1, Math.min(Number(process.env.BISPCRM_PUBLIC_OFFERS_MAX ?? 40), 200));
+
+  const [energyResults, telcoResults] = await Promise.all([
+    energy.fetchAll({ timeout: 12_000, extraUrls: csvEnvList('OFFER_SOURCES_ENERGY') }),
+    telco.fetchAll({ timeoutMs: 12_000, extraUrls: csvEnvList('OFFER_SOURCES_TELCO') }),
+  ]);
+
+  const normalized = [
+    ...energyResults.flatMap((r) => r.offers.map((o) => ({
+      title: `${o.operator} - ${o.offerName}`,
+      category: 'energy' as const,
+      conditions: [o.type, o.segment, o.commodity, o.url].filter(Boolean).join(' | '),
+      cost: o.fixedFeeEur,
+      targetSegments: inferSegmentsByCategory('energy'),
+      sourceKey: `${o.source}:${o.id}`,
+    }))),
+    ...telcoResults.flatMap((r) => r.offers.map((o) => ({
+      title: `${o.operator} - ${o.offerName}`,
+      category: 'connectivity' as const,
+      conditions: [o.serviceType, o.url].filter(Boolean).join(' | '),
+      cost: o.monthlyPriceEur,
+      targetSegments: inferSegmentsByCategory('connectivity'),
+      sourceKey: `${o.source}:${o.id}`,
+    }))),
+  ];
+
+  const dedupe = new Set<string>();
+  const candidates = normalized.filter((c) => {
+    const key = `${c.category}:${c.title.trim().toLowerCase()}`;
+    if (!c.title.trim() || dedupe.has(key)) return false;
+    dedupe.add(key);
+    return true;
+  }).slice(0, maxOffers);
+
+  let imported = 0;
+  for (const offer of candidates) {
+    try {
+      const res = await fetch(`${apiCoreUrl}/api/ingest/promo`, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          'x-bisp-role': role,
+          'x-copilotrm-source': offer.sourceKey,
+        },
+        body: JSON.stringify({
+          title: offer.title,
+          category: offer.category,
+          conditions: offer.conditions,
+          cost: offer.cost,
+          targetSegments: offer.targetSegments,
+        }),
+        signal: AbortSignal.timeout(timeoutMs),
+      });
+      if (res.ok) {
+        imported += 1;
+      } else {
+        logger.warn('worker-ingest public offer import failed', {
+          status: res.status,
+          title: offer.title,
+          category: offer.category,
+        });
+      }
+    } catch (error) {
+      logger.warn('worker-ingest public offer import error', {
+        title: offer.title,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
+  return { imported, attempted: candidates.length };
+}
 
 async function preflightRedis(url: string): Promise<boolean> {
   const timeoutMs = Number(process.env.BISPCRM_REDIS_CONNECT_TIMEOUT_MS ?? 3000);
@@ -134,6 +234,14 @@ async function main(): Promise<void> {
     total: allItems.length,
     new: newItems.length,
     sources: sources.map((s) => s.name),
+  });
+
+  // ── Public offer sources (energia + telco) ────────────────────────────────
+  const importedOffers = await ingestPublicOffersViaApi();
+  logger.info('worker-ingest public offers: imported', {
+    attempted: importedOffers.attempted,
+    imported: importedOffers.imported,
+    apiCoreUrl,
   });
 
   await orchestratorQueue.close();

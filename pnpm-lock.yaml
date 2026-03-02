@@ -311,9 +311,15 @@ importers:
       '@bisp/integrations-ean':
         specifier: workspace:*
         version: link:../../packages/integrations-ean
+      '@bisp/integrations-energy':
+        specifier: workspace:*
+        version: link:../../packages/integrations-energy
       '@bisp/integrations-rss':
         specifier: workspace:*
         version: link:../../packages/integrations-rss
+      '@bisp/integrations-telco':
+        specifier: workspace:*
+        version: link:../../packages/integrations-telco
       '@bisp/shared-logger':
         specifier: workspace:*
         version: link:../../packages/shared-logger

@@ -83,6 +83,10 @@ Vedere `.env.example` per la lista completa.
 | `RSS_FEEDS` | JSON array feed RSS pubblici (override della lista default in worker-ingest) |
 | `OFFER_SOURCES_ENERGY` | CSV URL pubblici fonti offerte energia (ARERA/operatori) |
 | `OFFER_SOURCES_TELCO` | CSV URL pubblici fonti offerte telco (AGCOM/operatori) |
+| `BISPCRM_INGEST_PUBLIC_OFFERS` | Abilita ingest offerte pubbliche energia/telco via worker-ingest |
+| `BISPCRM_PUBLIC_OFFERS_MAX` | Numero massimo offerte pubbliche importate per run |
+| `BISPCRM_INGEST_ROLE` | Ruolo RBAC usato dal worker-ingest per chiamare `/api/ingest/promo` |
+| `BISPCRM_INGEST_API_TIMEOUT_MS` | Timeout chiamata API ingest promo dal worker-ingest |
 | `TELEGRAM_BOT_TOKEN` | Token bot Telegram |
 | `SENDGRID_API_KEY` | API key SendGrid per email |
 | `WHATSAPP_API_TOKEN` | Token Meta Cloud API WhatsApp |
