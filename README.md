@@ -50,7 +50,7 @@ pnpm dev:check
 ```
 
 `dev:start` avvia: `api-core` (:4010) · `gateway-channels` (:4020) · `worker-content`
-· `web-crm` (:5173) · `web-assist` (:5174) · `web-manager` (:5175)
+· `worker-ingest` · `web-crm` (:5173) · `web-assist` (:5174) · `web-manager` (:5175)
 
 `dev:check` verifica health/infra snapshot con timeout e header RBAC.
 
@@ -77,6 +77,12 @@ Vedere `.env.example` per la lista completa.
 | `API_CORE_URL` | Alias compatibile URL api-core per worker/gateway |
 | `BISPCRM_CHANNEL_DISPATCH_MODE` | `gateway-first` \| `gateway-only` \| `local-only` |
 | `BISPCRM_GATEWAY_INBOUND_TIMEOUT_MS` | Timeout webhook inbound gateway→api-core |
+| `BISPCRM_ELIZA_ENV_PATH` | Path opzionale a `.env` esterno usato come fallback read-only per Admin Settings |
+| `BISPCRM_REDIS_CONNECT_TIMEOUT_MS` | Timeout preflight Redis per worker |
+| `BISPCRM_ORCHESTRATOR_API_TIMEOUT_MS` | Timeout chiamata worker-orchestrator → api-core |
+| `RSS_FEEDS` | JSON array feed RSS pubblici (override della lista default in worker-ingest) |
+| `OFFER_SOURCES_ENERGY` | CSV URL pubblici fonti offerte energia (ARERA/operatori) |
+| `OFFER_SOURCES_TELCO` | CSV URL pubblici fonti offerte telco (AGCOM/operatori) |
 | `TELEGRAM_BOT_TOKEN` | Token bot Telegram |
 | `SENDGRID_API_KEY` | API key SendGrid per email |
 | `WHATSAPP_API_TOKEN` | Token Meta Cloud API WhatsApp |

@@ -1427,6 +1427,7 @@ export function buildServer(state = buildState()) {
         dataDir: cfg.dataDir,
         channelGatewayUrl: cfg.channelGatewayUrl,
         channelDispatchMode: dispatchMode,
+        elizaEnvPath: process.env.BISPCRM_ELIZA_ENV_PATH ?? null,
       },
       gateway,
       queue,
@@ -1504,6 +1505,10 @@ export function buildServer(state = buildState()) {
     // Social
     { key: 'TWITTER_BEARER_TOKEN', category: 'social', label: 'X/Twitter Token' },
     { key: 'INSTAGRAM_ACCESS_TOKEN', category: 'social', label: 'Instagram Token' },
+    // Public sources
+    { key: 'RSS_FEEDS', category: 'sources', label: 'RSS feeds JSON' },
+    { key: 'OFFER_SOURCES_ENERGY', category: 'sources', label: 'Energy offer sources' },
+    { key: 'OFFER_SOURCES_TELCO', category: 'sources', label: 'Telco offer sources' },
     // Company / System
     { key: 'COMPANY_NAME', category: 'company', label: 'Nome azienda' },
     { key: 'COPILOTRM_DATA_DIR', category: 'system', label: 'Data directory' },
@@ -1511,6 +1516,7 @@ export function buildServer(state = buildState()) {
     { key: 'BISPCRM_MIGRATIONS_DIR', category: 'system', label: 'Migrations directory' },
     { key: 'BISPCRM_CHANNEL_GATEWAY_URL', category: 'system', label: 'Channel gateway URL' },
     { key: 'BISPCRM_CHANNEL_DISPATCH_MODE', category: 'system', label: 'Dispatch mode' },
+    { key: 'BISPCRM_ELIZA_ENV_PATH', category: 'system', label: 'Optional external env path' },
     { key: 'BISPCRM_PERSISTENCE_MODE', category: 'system', label: 'Persistence mode' },
     { key: 'BISPCRM_QUEUE_MODE', category: 'system', label: 'Queue mode' },
   ] as const;

@@ -22,6 +22,9 @@ fi
 : "${BISPCRM_MIGRATIONS_DIR:=${ROOT_DIR}/infra/migrations}"
 : "${BISPCRM_RUNTIME_DATA_DIR:=${ROOT_DIR}/data}"
 : "${BISPCRM_CHANNEL_GATEWAY_URL:=http://localhost:${PORT_GATEWAY_CHANNELS}}"
+: "${BISPCRM_ELIZA_ENV_PATH:=}"
+: "${BISPCRM_REDIS_CONNECT_TIMEOUT_MS:=3000}"
+: "${BISPCRM_ORCHESTRATOR_API_TIMEOUT_MS:=5000}"
 # DATABASE_URL deve essere definita in .env — nessun default con credenziali nello script
 if [ -z "${DATABASE_URL:-}" ]; then
   echo "[dev-env] ERROR: DATABASE_URL non definita. Configurala in .env" >&2
@@ -37,6 +40,9 @@ export BISPCRM_ROOT_DIR
 export BISPCRM_MIGRATIONS_DIR
 export BISPCRM_RUNTIME_DATA_DIR
 export BISPCRM_CHANNEL_GATEWAY_URL
+export BISPCRM_ELIZA_ENV_PATH
+export BISPCRM_REDIS_CONNECT_TIMEOUT_MS
+export BISPCRM_ORCHESTRATOR_API_TIMEOUT_MS
 export REDIS_URL
 export DATABASE_URL
 

@@ -358,12 +358,18 @@ importers:
 
   apps/worker-social:
     dependencies:
+      '@bisp/integrations-email':
+        specifier: workspace:*
+        version: link:../../packages/integrations-email
       '@bisp/integrations-social':
         specifier: workspace:*
         version: link:../../packages/integrations-social
       '@bisp/integrations-telegram':
         specifier: workspace:*
         version: link:../../packages/integrations-telegram
+      '@bisp/integrations-whatsapp':
+        specifier: workspace:*
+        version: link:../../packages/integrations-whatsapp
       '@bisp/shared-logger':
         specifier: workspace:*
         version: link:../../packages/shared-logger

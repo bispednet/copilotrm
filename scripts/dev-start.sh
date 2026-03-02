@@ -11,6 +11,7 @@ echo "[dev-start] Frontend → web-crm :5173  |  web-assist :5174  |  web-manage
 exec pnpm --parallel \
   --filter @bisp/apps-api-core \
   --filter @bisp/apps-worker-content \
+  --filter @bisp/apps-worker-ingest \
   --filter @bisp/apps-gateway-channels \
   --filter @bisp/apps-web-crm \
   --filter @bisp/apps-web-assist \

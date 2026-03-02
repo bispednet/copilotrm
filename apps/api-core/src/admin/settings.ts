@@ -7,7 +7,7 @@ export interface AdminSettingItem {
   key: string;
   value: string | boolean | number | string[] | null;
   type: 'string' | 'boolean' | 'number' | 'secret' | 'string[]';
-  source: 'default' | 'env' | 'runtime';
+  source: 'default' | 'env' | 'external-env' | 'runtime';
   category: SettingsCategory;
   description?: string;
 }
@@ -73,12 +73,41 @@ function parseNum(raw: string): number | null {
 }
 
 
-function firstEnvValue(env: Record<string, string>, keys: string[]): string | undefined {
-  for (const key of keys) {
-    const v = env[key];
-    if (v !== undefined && v !== '') return v;
+function parseDotEnv(content: string): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const rawLine of content.split(/\r?\n/g)) {
+    const line = rawLine.trim();
+    if (!line || line.startsWith('#')) continue;
+    const idx = line.indexOf('=');
+    if (idx <= 0) continue;
+    const key = line.slice(0, idx).trim();
+    const value = line.slice(idx + 1).trim().replace(/^['"]|['"]$/g, '');
+    if (key) out[key] = value;
   }
-  return undefined;
+  return out;
+}
+
+function loadOptionalExternalEnv(filePath: string | undefined): Record<string, string> {
+  if (!filePath || !existsSync(filePath)) return {};
+  try {
+    return parseDotEnv(readFileSync(filePath, 'utf8'));
+  } catch {
+    return {};
+  }
+}
+
+function resolveEnvValue(
+  keys: string[],
+  processEnv: Record<string, string>,
+  externalEnv: Record<string, string>
+): { raw?: string; source: 'env' | 'external-env' | 'default' } {
+  for (const key of keys) {
+    const processValue = processEnv[key];
+    if (processValue !== undefined && processValue !== '') return { raw: processValue, source: 'env' };
+    const externalValue = externalEnv[key];
+    if (externalValue !== undefined && externalValue !== '') return { raw: externalValue, source: 'external-env' };
+  }
+  return { source: 'default' };
 }
 
 function inferDefaultValue(item: typeof SETTING_CATALOG[number]): AdminSettingItem['value'] {
@@ -108,21 +137,20 @@ export class AdminSettingsRepository {
 
   private bootstrap(runtimePath: string): AdminSettingsState {
     const items: Record<string, AdminSettingItem> = {};
-
-    // Unica fonte: process.env, caricato da dev-env.sh con /home/funboy/copilotrm/.env
-    // Non si legge nessun file .env esterno: tutti i segreti vivono solo in .env di CopilotRM
-    const envSource = Object.fromEntries(
+    const processEnv = Object.fromEntries(
       Object.entries(process.env).filter((e): e is [string, string] => e[1] !== undefined)
     );
+    const externalEnv = loadOptionalExternalEnv(process.env.BISPCRM_ELIZA_ENV_PATH);
 
     for (const c of SETTING_CATALOG) {
-      const raw = firstEnvValue(envSource, c.envKeys);
+      const resolved = resolveEnvValue(c.envKeys, processEnv, externalEnv);
+      const raw = resolved.raw;
       const value = raw !== undefined ? (c.parse ? c.parse(raw) : raw) : inferDefaultValue(c);
       items[c.key] = {
         key: c.key,
         value,
         type: c.type,
-        source: raw !== undefined ? 'env' : 'default',
+        source: resolved.source,
         category: c.category,
         description: c.description,
       };

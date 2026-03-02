@@ -49,6 +49,24 @@ const pg =
 
 rag.add({ id: 'seed:content', text: 'Template content factory per promo hardware, smartphone, fibra, energia.' });
 
+async function preflightRedis(url: string): Promise<boolean> {
+  const timeoutMs = Number(process.env.BISPCRM_REDIS_CONNECT_TIMEOUT_MS ?? 3000);
+  const client = new IORedis(url, {
+    maxRetriesPerRequest: null,
+    retryStrategy: () => null,
+    connectTimeout: Number.isFinite(timeoutMs) && timeoutMs > 0 ? timeoutMs : 3000,
+  });
+  try {
+    const pong = await client.ping();
+    return pong === 'PONG';
+  } catch (error) {
+    logger.warn('worker-content redis preflight failed', { error: error instanceof Error ? error.message : String(error), redisUrl: url });
+    return false;
+  } finally {
+    await client.quit().catch(() => undefined);
+  }
+}
+
 // ── LLM + discussione ─────────────────────────────────────────────────────────
 let discussion: AgentDiscussion | null = null;
 try {
@@ -302,13 +320,24 @@ async function runInvoiceContentPipeline(payload: {
   return { cards, wpPostIds };
 }
 
-if (queueMode !== 'redis') {
-  logger.info('worker-content idle (queue mode inline)', { queueMode });
-  setInterval(() => undefined, 60 * 60 * 1000);
-} else {
+async function main(): Promise<void> {
+  if (queueMode !== 'redis') {
+    logger.info('worker-content idle (queue mode inline)', { queueMode });
+    setInterval(() => undefined, 60 * 60 * 1000);
+    return;
+  }
+
+  const redisReady = await preflightRedis(redisUrl);
+  if (!redisReady) {
+    logger.warn('worker-content idle (redis unavailable)', { queueMode, redisUrl });
+    setInterval(() => undefined, 60 * 60 * 1000);
+    return;
+  }
+
   const connection = new IORedis(redisUrl, {
     maxRetriesPerRequest: null,
     retryStrategy: () => null,
+    connectTimeout: runtimeCfg.channelGatewayTimeoutMs,
   });
   connection.on('error', (err) => logger.error('worker-content redis error', { error: err.message, redisUrl }));
 
@@ -396,3 +425,7 @@ if (queueMode !== 'redis') {
   mediaWorker.on('error', (err) => logger.error('worker-content media worker error', { error: err.message }));
   logger.info('worker-content online', { queues: ['content-jobs', 'media-jobs'], redisUrl, wpEnabled: !!wp });
 }
+
+void main().catch((error) => {
+  logger.error('worker-content startup failed', { error: error instanceof Error ? error.message : String(error) });
+});
