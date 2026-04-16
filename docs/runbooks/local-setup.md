@@ -87,6 +87,7 @@ curl http://localhost:4010/api/manager/kpi
 curl http://localhost:4010/api/admin/settings
 curl http://localhost:4010/api/admin/model-catalog
 curl http://localhost:4010/api/admin/rbac
+curl http://localhost:4010/api/admin/channel-control
 curl http://localhost:4010/api/tasks
 curl 'http://localhost:4010/api/outbox?status=pending-approval'
 ```
@@ -96,6 +97,58 @@ Approva e invia un draft:
 ```bash
 curl -X POST http://localhost:4010/api/outbox/draft_abc123/approve -H 'content-type: application/json' -d '{"actor":"manager"}'
 curl -X POST http://localhost:4010/api/outbox/draft_abc123/send
+```
+
+## Channel control quick probe
+
+```bash
+curl -X POST http://localhost:4010/api/channels/control/handle \
+  -H 'content-type: application/json' \
+  -H 'x-bisp-role: admin' \
+  -d '{"channel":"telegram","peerId":"demo-chat","text":"/start"}'
+```
+
+## Workspace sync / agenda / turni
+
+Sync manuale Google Workspace:
+
+```bash
+curl -X POST http://localhost:4010/api/admin/workspace/sync \
+  -H 'x-bisp-role: admin'
+```
+
+Snapshot admin Workspace:
+
+```bash
+curl http://localhost:4010/api/admin/workspace \
+  -H 'x-bisp-role: admin'
+```
+
+Probe pannello Workspace:
+
+```bash
+curl -X POST http://localhost:4010/api/channels/control/handle \
+  -H 'content-type: application/json' \
+  -H 'x-bisp-role: admin' \
+  -d '{"channel":"whatsapp","peerId":"demo-ops","text":"/workspace"}'
+```
+
+Query naturale su turni/appuntamenti:
+
+```bash
+curl -X POST http://localhost:4010/api/channels/control/handle \
+  -H 'content-type: application/json' \
+  -H 'x-bisp-role: admin' \
+  -d '{"channel":"whatsapp","peerId":"demo-ops","text":"Chi è di turno oggi?"}'
+```
+
+Create meeting via language:
+
+```bash
+curl -X POST http://localhost:4010/api/channels/control/handle \
+  -H 'content-type: application/json' \
+  -H 'x-bisp-role: admin' \
+  -d '{"channel":"telegram","peerId":"demo-ops","text":"Crea una riunione domani alle 10:30 con mario@azienda.it per 45 minuti"}'
 ```
 
 ## Ingest / Campaign / Consult

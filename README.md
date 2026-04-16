@@ -20,6 +20,7 @@ apps/
 
 packages/
   shared-types        Tipi dominio condivisi
+  channel-control     Pannelli, quick actions e rendering condiviso Telegram/WhatsApp
   shared-config       Configurazione da env
   shared-auth / rbac  Auth e autorizzazioni
   shared-db           Runtime Postgres (migrations, pool)
@@ -30,6 +31,7 @@ packages/
   orchestrator-*      Scoring, rules, handoff
   agents-*            Agenti business (assistance, preventivi, hardware, ...)
   integrations-llm    Client LLM unificato (Ollama/OpenAI/Anthropic/DeepSeek)
+  integrations-google-workspace Sheets + Calendar sync per agenda/turni/meeting
   integrations-*      Adapter canali e servizi esterni
   personas            Definizioni persona agenti
   prompts             Prompt builder functions
@@ -77,6 +79,7 @@ Vedere `.env.example` per la lista completa.
 | `API_CORE_URL` | Alias compatibile URL api-core per worker/gateway |
 | `BISPCRM_CHANNEL_DISPATCH_MODE` | `gateway-first` \| `gateway-only` \| `local-only` |
 | `BISPCRM_GATEWAY_INBOUND_TIMEOUT_MS` | Timeout webhook inbound gateway→api-core |
+| `BISPCRM_GATEWAY_CONTROL_TIMEOUT_MS` | Timeout control surface gateway→api-core (bot panels + quick actions) |
 | `BISPCRM_ELIZA_ENV_PATH` | Path opzionale a `.env` esterno usato come fallback read-only per Admin Settings |
 | `BISPCRM_REDIS_CONNECT_TIMEOUT_MS` | Timeout preflight Redis per worker |
 | `BISPCRM_ORCHESTRATOR_API_TIMEOUT_MS` | Timeout chiamata worker-orchestrator → api-core |
@@ -90,6 +93,13 @@ Vedere `.env.example` per la lista completa.
 | `TELEGRAM_BOT_TOKEN` | Token bot Telegram |
 | `SENDGRID_API_KEY` | API key SendGrid per email |
 | `WHATSAPP_API_TOKEN` | Token Meta Cloud API WhatsApp |
+| `WHATSAPP_ALLOWED_GROUP_IDS` | Allowlist opzionale group IDs WhatsApp per il bot aziendale |
+| `BISPCRM_GOOGLE_SERVICE_ACCOUNT_EMAIL` | Google service account per Sheets/Calendar |
+| `BISPCRM_GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY` | Private key PEM del service account |
+| `BISPCRM_GOOGLE_SHEETS_SOURCES_JSON` | JSON array sorgenti Google Sheets (turni, fogli operativi, knowledge) |
+| `BISPCRM_GOOGLE_CALENDAR_SOURCES_JSON` | JSON array calendari condivisi da sincronizzare |
+| `BISPCRM_GOOGLE_DEFAULT_CALENDAR_ID` | Calendario di default per creare meeting/inviti |
+| `BISPCRM_GOOGLE_SYNC_INTERVAL_MS` | Intervallo sync Workspace verso Postgres |
 | `COMPANY_NAME` | Ragione sociale (schede assistenza, PDF) |
 | `COPILOTRM_DATA_DIR` | Directory dati runtime (settings, characters) |
 
@@ -164,7 +174,11 @@ PATCH /api/admin/settings/:key
 GET  /api/admin/agents
 GET  /api/admin/models
 GET  /api/admin/channels
+GET  /api/admin/channel-control
+GET  /api/admin/workspace
+POST /api/admin/workspace/sync
 GET  /api/admin/characters
+POST /api/channels/control/handle
 GET  /api/system/infra
 POST /api/system/db/migrate
 POST /api/orchestrate
@@ -192,6 +206,40 @@ Se anche il fallback fallisce il sistema usa template string — non crasha mai.
 - Il codice sorgente non contiene valori di configurazione, credenziali o dati aziendali
 - `BISPCRM_AUTH_MODE=header` abilita RBAC minimo tramite header `x-bisp-role`
 - I token vanno ruotati periodicamente e dopo ogni eventuale esposizione
+
+---
+
+## Channel Control
+
+Telegram e WhatsApp non sono più trattati come semplici pipe outbound/inbound. Il refactor introduce:
+
+- pannelli `home`, `help`, `actions`, `approvals`, `outbox`, `status`, `integrations`
+- quick actions condivise tra Telegram e WhatsApp
+- routing per callback Telegram e reply interattive WhatsApp
+- fallback conversazionale sullo stesso `/api/chat`
+- telemetria canali esposta in admin
+- persistenza peer/eventi canale su Postgres
+- pannello Workspace con agenda, turni, meeting e sync Google
+- supporto group-aware per WhatsApp (con allowlist opzionale)
+
+Dettagli tecnici e roadmap nel file [docs/channel-control-refactor.md](docs/channel-control-refactor.md).
+
+## Workspace Operations
+
+Il runtime può sincronizzare Google Sheets e Google Calendar nel DB e renderli disponibili a:
+
+- WhatsApp e Telegram in linguaggio naturale
+- pannelli bot `Workspace`, `Agenda today`, `Shifts today`, `Create meeting`
+- admin manager UI
+- query grounded lato runtime
+
+Use cases coperti:
+
+- agenda appuntamenti condivisa
+- turni dipendenti e orari
+- meeting/inviti Google Calendar
+- fogli operativi da Google Sheets
+- risposte “idiotproof” in gruppo WhatsApp o nelle chat bot
 
 ---
 
