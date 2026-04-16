@@ -68,6 +68,14 @@ export interface TelegramSendResult {
   error?: string;
 }
 
+export interface TelegramEditResult {
+  ok: boolean;
+  provider: 'telegram';
+  messageId?: number;
+  chatId?: number | string;
+  error?: string;
+}
+
 // ─── TelegramBotClient (raw HTTP) ────────────────────────────────────────────
 
 export class TelegramBotClient {
@@ -120,6 +128,18 @@ export class TelegramBotClient {
     if (opts?.replyToMessageId) body.reply_to_message_id = opts.replyToMessageId;
     if (opts?.inlineKeyboard) body.reply_markup = { inline_keyboard: opts.inlineKeyboard };
     return this.call<TelegramMessage>('sendMessage', body);
+  }
+
+  async editMessageText(chatId: string | number, messageId: number, text: string, opts?: SendMessageOptions): Promise<TelegramMessage> {
+    const body: Record<string, unknown> = {
+      chat_id: chatId,
+      message_id: messageId,
+      text,
+      parse_mode: opts?.parseMode ?? 'HTML',
+    };
+    if (opts?.disableWebPagePreview) body.disable_web_page_preview = true;
+    if (opts?.inlineKeyboard) body.reply_markup = { inline_keyboard: opts.inlineKeyboard };
+    return this.call<TelegramMessage>('editMessageText', body);
   }
 
   async getUpdates(offset?: number, limit = 100): Promise<TelegramUpdate[]> {
@@ -183,6 +203,24 @@ export class TelegramChannelAdapter {
         ok: false,
         provider: 'telegram',
         chatId,
+        error: err instanceof Error ? err.message : String(err),
+      };
+    }
+  }
+
+  async editMessage(chatId: string | number, messageId: number, text: string, opts?: SendMessageOptions): Promise<TelegramEditResult> {
+    if (!this.client) {
+      return { ok: false, provider: 'telegram', error: 'TELEGRAM_BOT_TOKEN non configurato' };
+    }
+    try {
+      const msg = await this.client.editMessageText(chatId, messageId, text, opts);
+      return { ok: true, provider: 'telegram', messageId: msg.message_id, chatId: msg.chat.id };
+    } catch (err) {
+      return {
+        ok: false,
+        provider: 'telegram',
+        chatId,
+        messageId,
         error: err instanceof Error ? err.message : String(err),
       };
     }

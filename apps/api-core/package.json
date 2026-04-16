@@ -13,6 +13,7 @@
   "dependencies": {
     "@fastify/cors": "^10.0.1",
     "@bisp/agents-assistance": "workspace:*",
+    "@bisp/channel-control": "workspace:*",
     "@bisp/agents-compliance": "workspace:*",
     "@bisp/agents-content": "workspace:*",
     "@bisp/agents-customer-care": "workspace:*",
@@ -35,6 +36,7 @@
     "@bisp/integrations-media": "workspace:*",
     "@bisp/integrations-social": "workspace:*",
     "@bisp/integrations-telegram": "workspace:*",
+    "@bisp/integrations-google-workspace": "workspace:*",
     "@bisp/integrations-whatsapp": "workspace:*",
     "@bisp/orchestrator-core": "workspace:*",
     "@bisp/personas": "workspace:*",

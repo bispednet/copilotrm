@@ -58,6 +58,60 @@ type Outbox = { id: string; status: string; draft: { channel: string; audience: 
 type Objective = { id: string; name: string; active: boolean; periodStart: string; periodEnd: string; preferredOfferIds: string[] };
 type AdminSetting = { key: string; category: string; type?: 'string' | 'boolean' | 'number' | 'secret' | 'string[]'; source: string; value: unknown; description?: string };
 type EnvStatus = { key: string; category: string; label: string; configured: boolean };
+type ChannelControlSummary = {
+  customers: number;
+  offersActive: number;
+  tasksOpen: number;
+  outboxPending: number;
+  outboxQueued: number;
+  outboxSent: number;
+  pendingApprovals: number;
+  queueMode: 'inline' | 'redis';
+  queueWaiting: number;
+  integrations: { telegram: boolean; whatsapp: boolean; email: boolean; social: boolean; llm: boolean; googleWorkspace: boolean };
+  workspace: {
+    configured: boolean;
+    lastSyncAt?: string;
+    sheetRows: number;
+    calendarEvents: number;
+    shiftsToday: number;
+    meetingsUpcoming: number;
+  };
+};
+type ChannelControlTelemetryCounter = { label: string; count: number };
+type ChannelControlTelemetry = {
+  peersActive: number;
+  inboundByChannel: { telegram: number; whatsapp: number };
+  topActions: ChannelControlTelemetryCounter[];
+  topPanels: ChannelControlTelemetryCounter[];
+  awaitingInputPeers: number;
+};
+type ChannelControlPeer = {
+  channel: 'telegram' | 'whatsapp';
+  peerId: string;
+  profile?: { displayName?: string; username?: string; groupName?: string; peerType?: 'private' | 'group'; participantId?: string; participantName?: string };
+  lastPanel: string;
+  awaitingInputFor?: string;
+  updatedAt: string;
+};
+type ChannelControlOverview = {
+  summary: ChannelControlSummary;
+  telemetry: ChannelControlTelemetry;
+  peers: ChannelControlPeer[];
+};
+type WorkspaceOverview = {
+  summary: {
+    configured: boolean;
+    lastSyncAt?: string;
+    sheetRows: number;
+    calendarEvents: number;
+    shiftRowsToday: number;
+    upcomingMeetings: number;
+  };
+  nextEvents: Array<{ sourceKey: string; summary: string; startsAt?: string; endsAt?: string; kind: string }>;
+  todayShifts: Array<{ sourceKey: string; title: string; kind: string; payload: Record<string, string> }>;
+  latestSyncRuns: Array<{ id: string; status: string; createdAt: string; finishedAt?: string; error?: string }>;
+};
 type Character = {
   key: string;
   name: string;
@@ -163,6 +217,8 @@ function App() {
   const [campaignLaunch, setCampaignLaunch] = useState<Record<string, unknown> | null>(null);
 
   const [envStatus, setEnvStatus] = useState<EnvStatus[]>([]);
+  const [channelControl, setChannelControl] = useState<ChannelControlOverview | null>(null);
+  const [workspace, setWorkspace] = useState<WorkspaceOverview | null>(null);
 
   const [objectiveName, setObjectiveName] = useState('Nuovo obiettivo commerciale');
   const [selectedPreferredOffers, setSelectedPreferredOffers] = useState<string[]>([]);
@@ -220,7 +276,7 @@ function App() {
   }
 
   async function refreshAll(): Promise<void> {
-    const [c, o, t, tk, ob, kp, obj, st, ch, inf, ev] = await Promise.all([
+    const [c, o, t, tk, ob, kp, obj, st, ch, inf, ev, cc, ws] = await Promise.all([
       apiFetch('/api/customers').then((r) => r.json()),
       apiFetch('/api/offers').then((r) => r.json()),
       apiFetch('/api/tasks').then((r) => r.json()),
@@ -232,6 +288,8 @@ function App() {
       apiFetch('/api/admin/characters').then((r) => r.json()),
       apiFetch('/api/system/infra').then((r) => r.json()),
       apiFetch('/api/admin/env-status').then((r) => r.json()).catch(() => []),
+      apiFetch('/api/admin/channel-control').then((r) => r.json()).catch(() => null),
+      apiFetch('/api/admin/workspace').then((r) => r.json()).catch(() => null),
     ]);
     setCustomers(Array.isArray(c) ? c : []);
     setOffers(Array.isArray(o) ? o : []);
@@ -244,6 +302,8 @@ function App() {
     setCharacters(Array.isArray(ch) ? ch : []);
     setInfra(inf ?? null);
     setEnvStatus(Array.isArray(ev) ? ev : []);
+    setChannelControl(cc ?? null);
+    setWorkspace(ws ?? null);
     if (!selectedCharacterKey && Array.isArray(ch) && ch[0]?.key) {
       setSelectedCharacterKey(ch[0].key);
       setCharacterDraft(ch[0]);
@@ -1305,6 +1365,143 @@ function App() {
                 ))}
               </div>
             </section>
+
+            {channelControl && (
+              <section className="card" style={{ marginBottom: 24 }}>
+                <h2>Channel Control</h2>
+                <p className="muted" style={{ fontSize: 13, marginBottom: 16 }}>Snapshot live di pannelli canale, quick actions, peer attivi e traffico bot.</p>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))', gap: 12, marginBottom: 18 }}>
+                  <article className="card stat"><span>Peer attivi</span><strong>{channelControl.telemetry.peersActive}</strong></article>
+                  <article className="card stat"><span>Awaiting input</span><strong>{channelControl.telemetry.awaitingInputPeers}</strong></article>
+                  <article className="card stat"><span>Telegram inbound</span><strong>{channelControl.telemetry.inboundByChannel.telegram}</strong></article>
+                  <article className="card stat"><span>WhatsApp inbound</span><strong>{channelControl.telemetry.inboundByChannel.whatsapp}</strong></article>
+                  <article className="card stat"><span>Pending approvals</span><strong>{channelControl.summary.pendingApprovals}</strong></article>
+                  <article className="card stat"><span>Queue waiting</span><strong>{channelControl.summary.queueWaiting}</strong></article>
+                </div>
+                <div className="grid twoCols">
+                  <article className="card">
+                    <h3 style={{ marginTop: 0 }}>Top actions</h3>
+                    {channelControl.telemetry.topActions.length === 0 ? (
+                      <p className="muted">Nessuna azione canale ancora registrata.</p>
+                    ) : (
+                      <ul style={{ margin: 0, paddingLeft: 18 }}>
+                        {channelControl.telemetry.topActions.map((row) => (
+                          <li key={row.label} style={{ marginBottom: 6 }}>{row.label} <strong>{row.count}</strong></li>
+                        ))}
+                      </ul>
+                    )}
+                  </article>
+                  <article className="card">
+                    <h3 style={{ marginTop: 0 }}>Top panels</h3>
+                    {channelControl.telemetry.topPanels.length === 0 ? (
+                      <p className="muted">Nessun pannello aperto ancora.</p>
+                    ) : (
+                      <ul style={{ margin: 0, paddingLeft: 18 }}>
+                        {channelControl.telemetry.topPanels.map((row) => (
+                          <li key={row.label} style={{ marginBottom: 6 }}>{row.label} <strong>{row.count}</strong></li>
+                        ))}
+                      </ul>
+                    )}
+                  </article>
+                </div>
+                <article className="card" style={{ marginTop: 16 }}>
+                  <h3 style={{ marginTop: 0 }}>Recent peers</h3>
+                  {channelControl.peers.length === 0 ? (
+                    <p className="muted">Nessuna sessione canale attiva.</p>
+                  ) : (
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                      {channelControl.peers.slice(0, 8).map((peer) => (
+                        <div key={`${peer.channel}:${peer.peerId}`} style={{ display: 'grid', gridTemplateColumns: '110px 1fr 120px 180px', gap: 8, fontSize: 12, alignItems: 'center', borderBottom: '1px solid var(--line)', paddingBottom: 8 }}>
+                          <strong>{peer.channel}</strong>
+                          <span>{peer.profile?.displayName || peer.profile?.username || peer.peerId}</span>
+                          <span>{peer.lastPanel}</span>
+                          <span className="muted">{peer.awaitingInputFor ?? peer.updatedAt}</span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </article>
+              </section>
+            )}
+
+            {workspace && (
+              <section className="card" style={{ marginBottom: 24 }}>
+                <h2>Workspace</h2>
+                <p className="muted" style={{ fontSize: 13, marginBottom: 16 }}>Google Sheets e Calendar sincronizzati nel DB per agenda condivisa, turni, riunioni e knowledge operativa.</p>
+                <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 12 }}>
+                  <button
+                    className="ghost"
+                    onClick={async () => {
+                      setBusy(true);
+                      try {
+                        await apiFetch('/api/admin/workspace/sync', { method: 'POST' });
+                        await refreshAll();
+                      } finally {
+                        setBusy(false);
+                      }
+                    }}
+                  >
+                    Sync workspace
+                  </button>
+                </div>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))', gap: 12, marginBottom: 18 }}>
+                  <article className="card stat"><span>Configured</span><strong>{workspace.summary.configured ? 'yes' : 'no'}</strong></article>
+                  <article className="card stat"><span>Last sync</span><strong>{workspace.summary.lastSyncAt ? new Date(workspace.summary.lastSyncAt).toLocaleString() : 'never'}</strong></article>
+                  <article className="card stat"><span>Sheet rows</span><strong>{workspace.summary.sheetRows}</strong></article>
+                  <article className="card stat"><span>Calendar events</span><strong>{workspace.summary.calendarEvents}</strong></article>
+                  <article className="card stat"><span>Today shifts</span><strong>{workspace.summary.shiftRowsToday}</strong></article>
+                  <article className="card stat"><span>Upcoming meetings</span><strong>{workspace.summary.upcomingMeetings}</strong></article>
+                </div>
+                <div className="grid twoCols">
+                  <article className="card">
+                    <h3 style={{ marginTop: 0 }}>Next events</h3>
+                    {workspace.nextEvents.length === 0 ? (
+                      <p className="muted">Nessun evento caricato.</p>
+                    ) : (
+                      <ul style={{ margin: 0, paddingLeft: 18 }}>
+                        {workspace.nextEvents.slice(0, 6).map((event) => (
+                          <li key={`${event.sourceKey}:${event.summary}:${event.startsAt ?? ''}`} style={{ marginBottom: 6 }}>
+                            <strong>{event.summary}</strong> <span className="muted">{event.kind}</span>
+                            <div className="muted">{event.startsAt ? new Date(event.startsAt).toLocaleString() : 'n/d'}</div>
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                  </article>
+                  <article className="card">
+                    <h3 style={{ marginTop: 0 }}>Today shifts</h3>
+                    {workspace.todayShifts.length === 0 ? (
+                      <p className="muted">Nessun turno sincronizzato per oggi.</p>
+                    ) : (
+                      <ul style={{ margin: 0, paddingLeft: 18 }}>
+                        {workspace.todayShifts.slice(0, 6).map((row) => (
+                          <li key={`${row.sourceKey}:${row.title}`} style={{ marginBottom: 6 }}>
+                            <strong>{row.title}</strong>
+                            <div className="muted">{Object.entries(row.payload).slice(0, 3).map(([key, value]) => `${key}: ${value}`).join(' · ')}</div>
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                  </article>
+                </div>
+                <article className="card" style={{ marginTop: 16 }}>
+                  <h3 style={{ marginTop: 0 }}>Sync history</h3>
+                  {workspace.latestSyncRuns.length === 0 ? (
+                    <p className="muted">Nessun sync registrato.</p>
+                  ) : (
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                      {workspace.latestSyncRuns.slice(0, 8).map((run) => (
+                        <div key={run.id} style={{ display: 'grid', gridTemplateColumns: '110px 150px 1fr', gap: 8, fontSize: 12, alignItems: 'center', borderBottom: '1px solid var(--line)', paddingBottom: 8 }}>
+                          <strong>{run.status}</strong>
+                          <span>{new Date(run.createdAt).toLocaleString()}</span>
+                          <span className="muted">{run.error ?? 'ok'}</span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </article>
+              </section>
+            )}
 
             <section className="card">
               <h2>Impostazioni Runtime</h2>

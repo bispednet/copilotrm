@@ -6,7 +6,7 @@ export class CustomerCareAgent implements BusinessAgent {
   name = 'customer-care';
 
   supports(eventType: DomainEvent['type']): boolean {
-    return eventType === 'inbound.email.received' || eventType === 'inbound.whatsapp.received';
+    return eventType === 'inbound.email.received' || eventType === 'inbound.whatsapp.received' || eventType === 'inbound.telegram.received';
   }
 
   execute(ctx: OrchestratorContext): AgentExecutionResult {

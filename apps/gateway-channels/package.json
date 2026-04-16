@@ -11,6 +11,7 @@
   },
   "dependencies": {
     "@fastify/cors": "^9.0.1",
+    "@bisp/channel-control": "workspace:*",
     "@bisp/integrations-email": "workspace:*",
     "@bisp/integrations-social": "workspace:*",
     "@bisp/integrations-telegram": "workspace:*",

@@ -54,6 +54,8 @@ import { PostgresMirror } from './postgresMirror';
 import { QueueGateway } from './queueGateway';
 import { scenarioFactory } from './scenarioFactory';
 import { EventRuntime, type EventCycleType } from './eventsRuntime';
+import { ChannelControlRepository, handleChannelControlRequest } from './channelControl';
+import { WorkspaceRuntime } from './workspaceRuntime';
 import {
   buildCampaignTasks,
   buildOneToManyDraftsForOffer,
@@ -64,6 +66,7 @@ import {
   targetCustomersForOffer,
   validateDraftRecipient,
 } from './services';
+import type { SupportedControlChannel } from '@bisp/channel-control';
 
 export interface ApiState {
   contentCards: ContentCardRepository;
@@ -95,6 +98,8 @@ export interface ApiState {
   llm: LLMClient | null;
   swarmRuntime: SwarmRuntime;
   hardwareQuote: HardwareQuoteChain;
+  channelControl: ChannelControlRepository;
+  workspace: WorkspaceRuntime;
 }
 
 export function buildState(seed?: { customers?: CustomerProfile[]; offers?: ProductOffer[]; objectives?: ManagerObjective[] }): ApiState {
@@ -179,6 +184,8 @@ export function buildState(seed?: { customers?: CustomerProfile[]; offers?: Prod
     llm,
     swarmRuntime: new SwarmRuntime(),
     hardwareQuote: new HardwareQuoteChain(),
+    channelControl: new ChannelControlRepository(postgresMirror),
+    workspace: new WorkspaceRuntime({ postgresMirror, llm }),
   };
 }
 
@@ -1668,10 +1675,21 @@ export function buildServer(state = buildState()) {
         })
       );
     }
+    if (shouldAutoLoad) {
+      const [peers, events] = await Promise.all([
+        state.postgresMirror.loadChannelControlPeers(),
+        state.postgresMirror.loadChannelControlEvents(),
+      ]);
+      state.channelControl.hydrate(peers, events);
+    }
+    await state.workspace.hydrate();
+    await state.workspace.syncNow('startup');
+    state.workspace.start();
     eventRuntime.reschedule((type, trigger) => eventRuntime.trigger(type, trigger));
   });
   app.addHook('onClose', async () => {
     eventRuntime.shutdown();
+    state.workspace.stop();
     if (envFlag('BISPCRM_AUTO_SYNC_ON_CLOSE', false)) {
       await Promise.all(state.customers.list().map((c) => state.postgresMirror.saveCustomer(c)));
       await Promise.all(state.assistance.list().map((t) => state.postgresMirror.saveTicket(t)));
@@ -2202,6 +2220,14 @@ export function buildServer(state = buildState()) {
     // WhatsApp
     { key: 'WHATSAPP_PROVIDER', category: 'whatsapp', label: 'Provider' },
     { key: 'WHATSAPP_API_TOKEN', category: 'whatsapp', label: 'Token API' },
+    { key: 'WHATSAPP_ALLOWED_GROUP_IDS', category: 'whatsapp', label: 'Allowed group IDs' },
+    // Google Workspace
+    { key: 'BISPCRM_GOOGLE_SERVICE_ACCOUNT_EMAIL', category: 'workspace', label: 'Google service account email' },
+    { key: 'BISPCRM_GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY', category: 'workspace', label: 'Google service account private key' },
+    { key: 'BISPCRM_GOOGLE_IMPERSONATED_USER', category: 'workspace', label: 'Google impersonated user' },
+    { key: 'BISPCRM_GOOGLE_SHEETS_SOURCES_JSON', category: 'workspace', label: 'Google Sheets sources' },
+    { key: 'BISPCRM_GOOGLE_CALENDAR_SOURCES_JSON', category: 'workspace', label: 'Google Calendar sources' },
+    { key: 'BISPCRM_GOOGLE_DEFAULT_CALENDAR_ID', category: 'workspace', label: 'Default Google Calendar' },
     // WordPress
     { key: 'WP_API_URL', category: 'wordpress', label: 'WordPress URL' },
     { key: 'WP_API_TOKEN', category: 'wordpress', label: 'Token API' },
@@ -2322,6 +2348,9 @@ export function buildServer(state = buildState()) {
   });
   app.get('/api/admin/integrations', async (req, reply) => {
     if (ensurePermission(req, reply, 'settings:write') === null) return;
+    const channelControlSummary = await state.channelControl.buildSummary(state);
+    const channelControlTelemetry = state.channelControl.telemetry();
+    const workspace = await state.workspace.buildAdminSnapshot();
     return {
       adapters: {
         danea: { mode: 'read-only-stub', enabled: true },
@@ -2329,11 +2358,36 @@ export function buildServer(state = buildState()) {
         telegram: { mode: 'real', enabled: !!process.env.TELEGRAM_BOT_TOKEN },
         email: { mode: 'real', enabled: !!process.env.SENDGRID_API_KEY },
         whatsapp: { mode: 'real', enabled: !!process.env.WHATSAPP_API_TOKEN },
+        workspace: { mode: 'google-workspace', enabled: state.workspace.configured },
         social: { mode: 'real', enabled: !!(process.env.FACEBOOK_PAGE_ACCESS_TOKEN || process.env.TWITTER_BEARER_TOKEN || process.env.INSTAGRAM_ACCESS_TOKEN) },
         media: { mode: 'service-layer-stub', enabled: true },
       },
       queue: await state.queueGateway.snapshot(),
       persistence: await state.postgresMirror.health(),
+      workspace,
+      channelControl: {
+        summary: channelControlSummary,
+        telemetry: channelControlTelemetry,
+      },
+    };
+  });
+  app.get('/api/admin/channel-control', async (req, reply) => {
+    if (ensurePermission(req, reply, 'settings:write') === null) return;
+    return {
+      summary: await state.channelControl.buildSummary(state),
+      telemetry: state.channelControl.telemetry(),
+      peers: state.channelControl.listPeers().slice(0, 50),
+    };
+  });
+  app.get('/api/admin/workspace', async (req, reply) => {
+    if (ensurePermission(req, reply, 'settings:write') === null) return;
+    return state.workspace.buildAdminSnapshot();
+  });
+  app.post('/api/admin/workspace/sync', async (req, reply) => {
+    if (ensurePermission(req, reply, 'settings:write') === null) return;
+    return {
+      ok: true,
+      summary: await state.workspace.syncNow('manual'),
     };
   });
   app.get('/api/channels/dispatches', async (req, reply) => {
@@ -2624,6 +2678,22 @@ export function buildServer(state = buildState()) {
     persistOperationalOutput(state, output);
     void broadcastSwarmDebug(state, runId, event.type, output.tasks.length, output.drafts.length);
     return { ...output, swarmRunId: runId };
+  });
+  app.post<{
+    Body: {
+      channel: SupportedControlChannel;
+      peerId: string;
+      text?: string;
+      actionId?: string;
+      messageId?: string;
+      profile?: { displayName?: string; username?: string };
+    };
+  }>('/api/channels/control/handle', async (req, reply) => {
+    if (ensurePermission(req, reply, 'inbound:read') === null) return;
+    if (!req.body.channel || !req.body.peerId) {
+      return reply.code(400).send({ error: 'channel and peerId are required' });
+    }
+    return handleChannelControlRequest(state.channelControl, state, req.body);
   });
 
   app.get('/api/manager/objectives', async () => state.objectives.listAll());

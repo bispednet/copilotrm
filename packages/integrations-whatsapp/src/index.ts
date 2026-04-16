@@ -23,6 +23,7 @@ export interface WhatsAppTextMessage {
   to: string;        // numero in formato E.164 es. +39335123456 o 39335123456
   text: string;
   previewUrl?: boolean;
+  recipientType?: 'individual' | 'group';
 }
 
 export interface WhatsAppTemplateMessage {
@@ -32,6 +33,26 @@ export interface WhatsAppTemplateMessage {
   components?: Array<{
     type: 'header' | 'body' | 'button';
     parameters: Array<{ type: 'text' | 'currency' | 'date_time'; text?: string }>;
+  }>;
+}
+
+export interface WhatsAppInteractiveButtonMessage {
+  to: string;
+  body: string;
+  footer?: string;
+  recipientType?: 'individual' | 'group';
+  buttons: Array<{ id: string; title: string }>;
+}
+
+export interface WhatsAppInteractiveListMessage {
+  to: string;
+  body: string;
+  buttonText: string;
+  footer?: string;
+  recipientType?: 'individual' | 'group';
+  sections: Array<{
+    title: string;
+    rows: Array<{ id: string; title: string; description?: string }>;
   }>;
 }
 
@@ -65,7 +86,7 @@ export class WhatsAppCloudClient {
   async sendText(params: WhatsAppTextMessage): Promise<WhatsAppSendResult> {
     const body = {
       messaging_product: 'whatsapp',
-      recipient_type: 'individual',
+      recipient_type: params.recipientType ?? 'individual',
       to: this.normalizePhone(params.to),
       type: 'text',
       text: {
@@ -153,6 +174,104 @@ export class WhatsAppCloudClient {
       clearTimeout(timer);
     }
   }
+
+  async sendInteractiveButtons(params: WhatsAppInteractiveButtonMessage): Promise<WhatsAppSendResult> {
+    const body = {
+      messaging_product: 'whatsapp',
+      recipient_type: params.recipientType ?? 'individual',
+      to: this.normalizePhone(params.to),
+      type: 'interactive',
+      interactive: {
+        type: 'button',
+        body: { text: params.body },
+        footer: params.footer ? { text: params.footer } : undefined,
+        action: {
+          buttons: params.buttons.slice(0, 3).map((button) => ({
+            type: 'reply',
+            reply: {
+              id: button.id,
+              title: button.title.slice(0, 20),
+            },
+          })),
+        },
+      },
+    };
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 15_000);
+    try {
+      const res = await fetch(this.apiUrl, {
+        method: 'POST',
+        signal: controller.signal,
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${this.token}`,
+        },
+        body: JSON.stringify(body),
+      });
+      const data = (await res.json()) as {
+        messages?: Array<{ id: string }>;
+        error?: { message: string; code: number };
+      };
+      if (!res.ok || data.error) {
+        return { ok: false, status: 'failed', provider: 'meta', error: `WhatsApp interactive: ${data.error?.message ?? res.status}` };
+      }
+      return { ok: true, status: 'sent', provider: 'meta', messageId: data.messages?.[0]?.id };
+    } catch (err) {
+      return { ok: false, status: 'failed', provider: 'meta', error: err instanceof Error ? err.message : String(err) };
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  async sendInteractiveList(params: WhatsAppInteractiveListMessage): Promise<WhatsAppSendResult> {
+    const body = {
+      messaging_product: 'whatsapp',
+      recipient_type: params.recipientType ?? 'individual',
+      to: this.normalizePhone(params.to),
+      type: 'interactive',
+      interactive: {
+        type: 'list',
+        body: { text: params.body },
+        footer: params.footer ? { text: params.footer } : undefined,
+        action: {
+          button: params.buttonText.slice(0, 20),
+          sections: params.sections.slice(0, 10).map((section) => ({
+            title: section.title.slice(0, 24),
+            rows: section.rows.slice(0, 10).map((row) => ({
+              id: row.id,
+              title: row.title.slice(0, 24),
+              description: row.description?.slice(0, 72),
+            })),
+          })),
+        },
+      },
+    };
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 15_000);
+    try {
+      const res = await fetch(this.apiUrl, {
+        method: 'POST',
+        signal: controller.signal,
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${this.token}`,
+        },
+        body: JSON.stringify(body),
+      });
+      const data = (await res.json()) as {
+        messages?: Array<{ id: string }>;
+        error?: { message: string; code: number };
+      };
+      if (!res.ok || data.error) {
+        return { ok: false, status: 'failed', provider: 'meta', error: `WhatsApp interactive list: ${data.error?.message ?? res.status}` };
+      }
+      return { ok: true, status: 'sent', provider: 'meta', messageId: data.messages?.[0]?.id };
+    } catch (err) {
+      return { ok: false, status: 'failed', provider: 'meta', error: err instanceof Error ? err.message : String(err) };
+    } finally {
+      clearTimeout(timer);
+    }
+  }
 }
 
 // ─── Channel adapter ──────────────────────────────────────────────────────────
@@ -170,6 +289,13 @@ export class WhatsAppChannelAdapter {
 
   get configured(): boolean {
     return this.wa !== null;
+  }
+
+  async sendText(toPhone: string, text: string, previewUrl = false, recipientType: 'individual' | 'group' = 'individual'): Promise<WhatsAppSendResult> {
+    if (!this.wa) {
+      return { ok: false, status: 'failed', provider: 'stub', error: 'WHATSAPP_API_TOKEN non configurato' };
+    }
+    return this.wa.sendText({ to: toPhone, text, previewUrl, recipientType });
   }
 
   /**
@@ -194,5 +320,32 @@ export class WhatsAppChannelAdapter {
     }
 
     return this.wa.sendText({ to: phone, text: draft.body });
+  }
+
+  async sendInteractiveButtons(
+    toPhone: string,
+    body: string,
+    buttons: Array<{ id: string; title: string }>,
+    footer?: string,
+    recipientType: 'individual' | 'group' = 'individual'
+  ): Promise<WhatsAppSendResult> {
+    if (!this.wa) {
+      return { ok: false, status: 'failed', provider: 'stub', error: 'WHATSAPP_API_TOKEN non configurato' };
+    }
+    return this.wa.sendInteractiveButtons({ to: toPhone, body, footer, buttons, recipientType });
+  }
+
+  async sendInteractiveList(
+    toPhone: string,
+    body: string,
+    buttonText: string,
+    sections: Array<{ title: string; rows: Array<{ id: string; title: string; description?: string }> }>,
+    footer?: string,
+    recipientType: 'individual' | 'group' = 'individual'
+  ): Promise<WhatsAppSendResult> {
+    if (!this.wa) {
+      return { ok: false, status: 'failed', provider: 'stub', error: 'WHATSAPP_API_TOKEN non configurato' };
+    }
+    return this.wa.sendInteractiveList({ to: toPhone, body, buttonText, sections, footer, recipientType });
   }
 }

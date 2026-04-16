@@ -1,5 +1,6 @@
 import Fastify from 'fastify';
 import type { CommunicationDraft } from '@bisp/shared-types';
+import type { ChannelButton, ChannelControlResponse } from '@bisp/channel-control';
 import { TelegramChannelAdapter } from '@bisp/integrations-telegram';
 import { EmailChannelAdapter } from '@bisp/integrations-email';
 import { SocialChannelAdapter } from '@bisp/integrations-social';
@@ -46,6 +47,147 @@ async function postInboundToApiCore(event: Record<string, unknown>): Promise<voi
     body: JSON.stringify({ event }),
     signal: AbortSignal.timeout(Number.isFinite(timeoutMs) && timeoutMs > 0 ? timeoutMs : 3000),
   });
+}
+
+async function postChannelControlToApiCore(payload: Record<string, unknown>): Promise<ChannelControlResponse> {
+  const timeoutMs = Number(process.env.BISPCRM_GATEWAY_CONTROL_TIMEOUT_MS ?? process.env.BISPCRM_GATEWAY_INBOUND_TIMEOUT_MS ?? 12000);
+  const res = await fetch(`${apiCoreUrl}/api/channels/control/handle`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-bisp-role': 'admin' },
+    body: JSON.stringify(payload),
+    signal: AbortSignal.timeout(Number.isFinite(timeoutMs) && timeoutMs > 0 ? timeoutMs : 3000),
+  });
+  if (!res.ok) {
+    const errorBody = await res.text().catch(() => '');
+    throw new Error(`channel control failed (${res.status}) ${errorBody}`.trim());
+  }
+  return res.json() as Promise<ChannelControlResponse>;
+}
+
+function toTelegramKeyboard(buttons?: ChannelButton[][]): Array<Array<{ text: string; callback_data?: string; url?: string }>> | undefined {
+  if (!buttons || buttons.length === 0) return undefined;
+  return buttons.map((row) =>
+    row.map((button) => ({
+      text: button.label,
+      callback_data: button.url ? undefined : String(button.id),
+      url: button.url,
+    }))
+  );
+}
+
+async function sendTelegramControlResponse(chatId: string, messageId: number | undefined, response: ChannelControlResponse): Promise<void> {
+  for (const instruction of response.instructions) {
+    const keyboard = toTelegramKeyboard(instruction.buttons);
+    if (instruction.mode === 'update-message' && messageId != null) {
+      const edited = await telegram.editMessage(chatId, messageId, instruction.text, { parseMode: 'HTML', inlineKeyboard: keyboard });
+      if (edited.ok) continue;
+    }
+    await telegram.sendMessage(chatId, instruction.text, { parseMode: 'HTML', inlineKeyboard: keyboard });
+  }
+}
+
+async function sendWhatsAppControlResponse(peerId: string, response: ChannelControlResponse, peerType: 'private' | 'group' = 'private'): Promise<void> {
+  for (const instruction of response.instructions) {
+    const flatButtons = instruction.buttons?.flat() ?? [];
+    if (flatButtons.length > 0 && flatButtons.length <= 3) {
+      await whatsapp.sendInteractiveButtons(
+        peerId,
+        instruction.text,
+        flatButtons.map((button) => ({ id: String(button.id), title: button.label })),
+        'CopilotRM',
+        peerType === 'group' ? 'group' : 'individual'
+      );
+      continue;
+    }
+    if (flatButtons.length > 3) {
+      await whatsapp.sendInteractiveList(
+        peerId,
+        instruction.text,
+        'Open actions',
+        [{
+          title: 'CopilotRM actions',
+          rows: flatButtons.slice(0, 10).map((button) => ({
+            id: String(button.id),
+            title: button.label,
+          })),
+        }],
+        'CopilotRM',
+        peerType === 'group' ? 'group' : 'individual'
+      );
+      continue;
+    }
+    await whatsapp.sendText(peerId, instruction.text, false, peerType === 'group' ? 'group' : 'individual');
+  }
+}
+
+function parseCsvSet(raw: string | undefined): Set<string> {
+  return new Set(
+    String(raw ?? '')
+      .split(',')
+      .map((item) => item.trim())
+      .filter(Boolean)
+  );
+}
+
+function asRecord(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === 'object' ? (value as Record<string, unknown>) : undefined;
+}
+
+function firstString(...values: unknown[]): string | undefined {
+  for (const value of values) {
+    if (typeof value === 'string' && value.trim()) return value.trim();
+  }
+  return undefined;
+}
+
+function extractWhatsAppPeer(msg: Record<string, unknown>, profileName: string): {
+  peerId: string;
+  messageText: string;
+  actionId?: string;
+  profile: {
+    displayName?: string;
+    peerType?: 'private' | 'group';
+    groupName?: string;
+    participantId?: string;
+    participantName?: string;
+  };
+} | null {
+  const interactive = asRecord(msg.interactive);
+  const buttonReply = asRecord(interactive?.button_reply);
+  const listReply = asRecord(interactive?.list_reply);
+  const textBody = String(asRecord(msg.text)?.body ?? '').trim();
+  const actionId = String(buttonReply?.id ?? listReply?.id ?? '').trim() || undefined;
+  const messageText = textBody || String(buttonReply?.title ?? listReply?.title ?? '').trim();
+
+  const context = asRecord(msg.context);
+  const group = asRecord(msg.group) ?? asRecord(context?.group);
+  const conversation = asRecord(msg.conversation) ?? asRecord(context?.conversation);
+  const metadata = asRecord(msg.metadata);
+  const groupId = firstString(
+    msg.group_id,
+    group?.id,
+    conversation?.id,
+    context?.group_id,
+    msg.chat_id,
+    msg.chatId
+  );
+  const groupName = firstString(group?.subject, group?.name, conversation?.name, context?.group_subject, context?.group_name);
+  const peerType = groupId || String(msg.recipient_type ?? '').toLowerCase() === 'group' ? 'group' : 'private';
+  const peerId = groupId ?? String(msg.from ?? '');
+  if (!peerId || (!messageText && !actionId)) return null;
+  const participantId = firstString(msg.from, context?.from, msg.author);
+  return {
+    peerId,
+    messageText,
+    actionId,
+    profile: {
+      displayName: profileName || firstString(asRecord(msg.profile)?.name, metadata?.display_phone_number),
+      peerType,
+      groupName,
+      participantId,
+      participantName: profileName || undefined,
+    },
+  };
 }
 
 async function persistDispatch(record: {
@@ -183,28 +325,63 @@ app.post<{ Body: { draft: CommunicationDraft; recipientRef?: string } }>('/api/c
 // ── Inbound webhook: Telegram ─────────────────────────────────────────────
 app.post<{ Body: Record<string, unknown> }>('/api/inbound/telegram', async (req, reply) => {
   const update = req.body;
-  const message = (update.message ?? update.edited_message) as Record<string, unknown> | undefined;
-  if (!message) return reply.code(200).send({ ok: true, skipped: true });
-  const from = message.from as Record<string, unknown> | undefined;
-  const chat = message.chat as Record<string, unknown> | undefined;
-  const text = String(message.text ?? '').trim();
-  if (!text) return reply.code(200).send({ ok: true, skipped: true });
-
-  const event = {
-    id: `tg_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`,
-    type: 'inbound.whatsapp.received',
-    occurredAt: new Date().toISOString(),
-    payload: {
-      channel: 'telegram',
-      from: String(from?.username ?? from?.id ?? 'unknown'),
-      chatId: String(chat?.id ?? ''),
-      body: text,
-      subject: '',
-    },
-  };
   try {
-    await postInboundToApiCore(event as unknown as Record<string, unknown>);
-  } catch { /* best-effort, Telegram expects 200 */ }
+    const callback = update.callback_query as Record<string, unknown> | undefined;
+    if (callback) {
+      const callbackMessage = callback.message as Record<string, unknown> | undefined;
+      const callbackChat = callbackMessage?.chat as Record<string, unknown> | undefined;
+      const callbackFrom = callback.from as Record<string, unknown> | undefined;
+      const callbackData = String(callback.data ?? '').trim();
+      const chatId = String(callbackChat?.id ?? '');
+      const messageId = Number(callbackMessage?.message_id ?? 0) || undefined;
+      if (chatId && callbackData) {
+        const response = await postChannelControlToApiCore({
+          channel: 'telegram',
+          peerId: chatId,
+          actionId: callbackData,
+          messageId: messageId ? String(messageId) : undefined,
+          profile: {
+            displayName: String(callbackFrom?.first_name ?? ''),
+            username: String(callbackFrom?.username ?? ''),
+            groupName: String(callbackChat?.title ?? ''),
+            peerType: ['group', 'supergroup'].includes(String(callbackChat?.type ?? '')) ? 'group' : 'private',
+          },
+        });
+        await sendTelegramControlResponse(chatId, messageId, response);
+        if (callback.id) {
+          await telegram.client?.answerCallbackQuery(String(callback.id), response.callbackNotice);
+        }
+        return reply.code(200).send({ ok: true, handled: true, mode: 'callback' });
+      }
+    }
+
+    const message = (update.message ?? update.edited_message ?? update.channel_post) as Record<string, unknown> | undefined;
+    if (!message) return reply.code(200).send({ ok: true, skipped: true });
+    const from = message.from as Record<string, unknown> | undefined;
+    const chat = message.chat as Record<string, unknown> | undefined;
+    const text = String(message.text ?? '').trim();
+    if (!text) return reply.code(200).send({ ok: true, skipped: true });
+
+    const chatId = String(chat?.id ?? '');
+    const messageId = Number(message.message_id ?? 0) || undefined;
+    if (!chatId) return reply.code(200).send({ ok: true, skipped: true });
+
+    const response = await postChannelControlToApiCore({
+      channel: 'telegram',
+      peerId: chatId,
+      text,
+      messageId: messageId ? String(messageId) : undefined,
+      profile: {
+        displayName: String(from?.first_name ?? ''),
+        username: String(from?.username ?? ''),
+        groupName: String(chat?.title ?? ''),
+        peerType: ['group', 'supergroup'].includes(String(chat?.type ?? '')) ? 'group' : 'private',
+      },
+    });
+    await sendTelegramControlResponse(chatId, messageId, response);
+  } catch {
+    /* best-effort, Telegram expects 200 */
+  }
   return reply.code(200).send({ ok: true });
 });
 
@@ -219,6 +396,7 @@ app.get<{ Querystring: Record<string, string> }>('/api/inbound/whatsapp', async 
 
 app.post<{ Body: Record<string, unknown> }>('/api/inbound/whatsapp', async (req, reply) => {
   try {
+    const allowedGroupIds = parseCsvSet(process.env.WHATSAPP_ALLOWED_GROUP_IDS);
     const entries = (req.body.entry as unknown[]) ?? [];
     for (const rawEntry of entries) {
       const entry = rawEntry as Record<string, unknown>;
@@ -227,17 +405,28 @@ app.post<{ Body: Record<string, unknown> }>('/api/inbound/whatsapp', async (req,
         const change = rawChange as Record<string, unknown>;
         const value = change.value as Record<string, unknown> | undefined;
         const messages = (value?.messages as Array<Record<string, unknown>>) ?? [];
+        const contacts = (value?.contacts as Array<Record<string, unknown>>) ?? [];
+        const profileName = String((contacts[0]?.profile as Record<string, unknown> | undefined)?.name ?? '');
+
         for (const msg of messages) {
-          const from = String(msg.from ?? '');
-          const body = String((msg.text as Record<string, unknown> | undefined)?.body ?? '').trim();
-          if (!body) continue;
-          const event = {
-            id: `wa_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`,
-            type: 'inbound.whatsapp.received',
-            occurredAt: new Date().toISOString(),
-            payload: { channel: 'whatsapp', from, body, subject: '' },
-          };
-          await postInboundToApiCore(event as unknown as Record<string, unknown>);
+          const extracted = extractWhatsAppPeer(msg, profileName);
+          if (!extracted) continue;
+          if (
+            extracted.profile.peerType === 'group' &&
+            allowedGroupIds.size > 0 &&
+            !allowedGroupIds.has(extracted.peerId)
+          ) {
+            continue;
+          }
+
+          const response = await postChannelControlToApiCore({
+            channel: 'whatsapp',
+            peerId: extracted.peerId,
+            text: extracted.messageText,
+            actionId: extracted.actionId,
+            profile: extracted.profile,
+          });
+          await sendWhatsAppControlResponse(extracted.peerId, response, extracted.profile.peerType ?? 'private');
         }
       }
     }

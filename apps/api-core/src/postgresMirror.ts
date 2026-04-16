@@ -39,6 +39,72 @@ export interface MediaJobRecord {
   processedAt?: string;
 }
 
+export interface ChannelControlPeerRecord {
+  channel: 'telegram' | 'whatsapp';
+  peerId: string;
+  profile?: Record<string, unknown>;
+  lastPanel: string;
+  awaitingInputFor?: string;
+  lastSessionId?: string;
+  updatedAt: string;
+}
+
+export interface ChannelControlEventRecord {
+  id: string;
+  channel: 'telegram' | 'whatsapp';
+  peerId: string;
+  kind: 'text' | 'action' | 'panel' | 'workflow' | 'system';
+  label: string;
+  createdAt: string;
+}
+
+export interface WorkspaceSyncRunRecord {
+  id: string;
+  source: 'google-workspace';
+  reason: string;
+  status: 'completed' | 'failed' | 'skipped';
+  summary: Record<string, unknown>;
+  error?: string;
+  createdAt: string;
+  finishedAt?: string;
+}
+
+export interface WorkspaceSheetRowRecord {
+  sourceKey: string;
+  spreadsheetId: string;
+  rangeName: string;
+  kind: string;
+  rowId: string;
+  rowIndex: number;
+  title: string;
+  searchableText: string;
+  payload: Record<string, string>;
+  updatedAt: string;
+}
+
+export interface WorkspaceCalendarEventRecord {
+  sourceKey: string;
+  calendarId: string;
+  eventId: string;
+  kind: string;
+  summary: string;
+  startsAt?: string;
+  endsAt?: string;
+  attendees: Array<{ email?: string; displayName?: string; responseStatus?: string }>;
+  searchableText: string;
+  payload: Record<string, unknown>;
+  updatedAt: string;
+}
+
+export interface WorkspaceOverviewRecord {
+  configured: boolean;
+  lastSyncAt?: string;
+  sheetRows: number;
+  calendarEvents: number;
+  shiftRowsToday: number;
+  upcomingMeetings: number;
+}
+
 export class PostgresMirror {
   readonly enabled: boolean;
   private readonly db?: PgRuntime;
@@ -240,6 +306,408 @@ export class PostgresMirror {
     );
   }
 
+  async saveChannelControlPeer(record: ChannelControlPeerRecord): Promise<void> {
+    if (!(await this.ensureReady()) || !this.db) return;
+    await this.db.pool.query(
+      `insert into channel_control_peers (channel, peer_id, profile, last_panel, awaiting_input_for, last_session_id, updated_at)
+       values ($1,$2,$3::jsonb,$4,$5,$6,$7::timestamptz)
+       on conflict (channel, peer_id) do update
+       set profile=excluded.profile,
+           last_panel=excluded.last_panel,
+           awaiting_input_for=excluded.awaiting_input_for,
+           last_session_id=excluded.last_session_id,
+           updated_at=excluded.updated_at`,
+      [
+        record.channel,
+        record.peerId,
+        JSON.stringify(record.profile ?? {}),
+        record.lastPanel,
+        record.awaitingInputFor ?? null,
+        record.lastSessionId ?? null,
+        record.updatedAt,
+      ]
+    );
+  }
+
+  async loadChannelControlPeers(limit = 500): Promise<ChannelControlPeerRecord[]> {
+    if (!(await this.ensureReady()) || !this.db) return [];
+    const res = await this.db.pool.query<{
+      channel: 'telegram' | 'whatsapp';
+      peer_id: string;
+      profile: unknown;
+      last_panel: string;
+      awaiting_input_for: string | null;
+      last_session_id: string | null;
+      updated_at: string;
+    }>(
+      `select channel, peer_id, profile, last_panel, awaiting_input_for, last_session_id, updated_at::text
+       from channel_control_peers
+       order by updated_at desc
+       limit $1`,
+      [limit]
+    );
+    return res.rows.map((row) => ({
+      channel: row.channel,
+      peerId: row.peer_id,
+      profile: safeJson<Record<string, unknown>>(row.profile) ?? undefined,
+      lastPanel: row.last_panel,
+      awaitingInputFor: row.awaiting_input_for ?? undefined,
+      lastSessionId: row.last_session_id ?? undefined,
+      updatedAt: row.updated_at,
+    }));
+  }
+
+  async saveChannelControlEvent(record: ChannelControlEventRecord): Promise<void> {
+    if (!(await this.ensureReady()) || !this.db) return;
+    await this.db.pool.query(
+      `insert into channel_control_events (id, channel, peer_id, kind, label, created_at)
+       values ($1,$2,$3,$4,$5,$6::timestamptz)
+       on conflict (id) do nothing`,
+      [record.id, record.channel, record.peerId, record.kind, record.label, record.createdAt]
+    );
+  }
+
+  async loadChannelControlEvents(limit = 1500): Promise<ChannelControlEventRecord[]> {
+    if (!(await this.ensureReady()) || !this.db) return [];
+    const res = await this.db.pool.query<{
+      id: string;
+      channel: 'telegram' | 'whatsapp';
+      peer_id: string;
+      kind: 'text' | 'action' | 'panel' | 'workflow' | 'system';
+      label: string;
+      created_at: string;
+    }>(
+      `select id, channel, peer_id, kind, label, created_at::text
+       from channel_control_events
+       order by created_at desc
+       limit $1`,
+      [limit]
+    );
+    return res.rows
+      .reverse()
+      .map((row) => ({
+        id: row.id,
+        channel: row.channel,
+        peerId: row.peer_id,
+        kind: row.kind,
+        label: row.label,
+        createdAt: row.created_at,
+      }));
+  }
+
+  async saveWorkspaceSyncRun(record: WorkspaceSyncRunRecord): Promise<void> {
+    if (!(await this.ensureReady()) || !this.db) return;
+    await this.db.pool.query(
+      `insert into workspace_sync_runs (id, source, reason, status, summary, error, created_at, finished_at)
+       values ($1,$2,$3,$4,$5::jsonb,$6,$7::timestamptz,$8::timestamptz)
+       on conflict (id) do update
+       set status=excluded.status, summary=excluded.summary, error=excluded.error, finished_at=excluded.finished_at`,
+      [
+        record.id,
+        record.source,
+        record.reason,
+        record.status,
+        JSON.stringify(record.summary ?? {}),
+        record.error ?? null,
+        record.createdAt,
+        record.finishedAt ?? null,
+      ]
+    );
+  }
+
+  async loadWorkspaceSyncRuns(limit = 25): Promise<WorkspaceSyncRunRecord[]> {
+    if (!(await this.ensureReady()) || !this.db) return [];
+    const res = await this.db.pool.query<{
+      id: string;
+      source: 'google-workspace';
+      reason: string;
+      status: 'completed' | 'failed' | 'skipped';
+      summary: unknown;
+      error: string | null;
+      created_at: string;
+      finished_at: string | null;
+    }>(
+      `select id, source, reason, status, summary, error, created_at::text, finished_at::text
+       from workspace_sync_runs
+       order by created_at desc
+       limit $1`,
+      [limit]
+    );
+    return res.rows.map((row) => ({
+      id: row.id,
+      source: row.source,
+      reason: row.reason,
+      status: row.status,
+      summary: safeJson<Record<string, unknown>>(row.summary) ?? {},
+      error: row.error ?? undefined,
+      createdAt: row.created_at,
+      finishedAt: row.finished_at ?? undefined,
+    }));
+  }
+
+  async replaceWorkspaceSheetRows(sourceKey: string, rows: WorkspaceSheetRowRecord[]): Promise<void> {
+    await this.replaceWorkspaceSheetRowsInternal(sourceKey, rows, false);
+  }
+
+  async replaceWorkspaceSheetRowsInternal(sourceKey: string, rows: WorkspaceSheetRowRecord[], merge: boolean): Promise<void> {
+    if (!(await this.ensureReady()) || !this.db) return;
+    const client = await this.db.pool.connect();
+    try {
+      await client.query('begin');
+      if (!merge) {
+        await client.query('delete from workspace_sheet_rows where source_key = $1', [sourceKey]);
+      }
+      for (const row of rows) {
+        await client.query(
+          `insert into workspace_sheet_rows (source_key, spreadsheet_id, range_name, kind, row_id, row_index, title, searchable_text, payload, updated_at)
+           values ($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb,$10::timestamptz)
+           on conflict (source_key, row_id) do update
+           set spreadsheet_id=excluded.spreadsheet_id,
+               range_name=excluded.range_name,
+               kind=excluded.kind,
+               row_index=excluded.row_index,
+               title=excluded.title,
+               searchable_text=excluded.searchable_text,
+               payload=excluded.payload,
+               updated_at=excluded.updated_at`,
+          [
+            row.sourceKey,
+            row.spreadsheetId,
+            row.rangeName,
+            row.kind,
+            row.rowId,
+            row.rowIndex,
+            row.title,
+            row.searchableText,
+            JSON.stringify(row.payload ?? {}),
+            row.updatedAt,
+          ]
+        );
+      }
+      await client.query('commit');
+    } catch (error) {
+      await client.query('rollback');
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async loadWorkspaceSheetRows(filters?: { kind?: string; query?: string; dayIso?: string; limit?: number }): Promise<WorkspaceSheetRowRecord[]> {
+    if (!(await this.ensureReady()) || !this.db) return [];
+    const clauses: string[] = [];
+    const params: unknown[] = [];
+    if (filters?.kind) {
+      params.push(filters.kind);
+      clauses.push(`kind = $${params.length}`);
+    }
+    if (filters?.query) {
+      params.push(`%${filters.query.toLowerCase()}%`);
+      clauses.push(`lower(searchable_text) like $${params.length}`);
+    }
+    if (filters?.dayIso) {
+      params.push(filters.dayIso.slice(0, 10));
+      clauses.push(`(
+        lower(coalesce(payload->>'date', '')) like '%' || $${params.length} || '%'
+        or lower(coalesce(payload->>'data', '')) like '%' || $${params.length} || '%'
+        or lower(coalesce(payload->>'day', '')) like '%' || $${params.length} || '%'
+        or lower(coalesce(payload->>'giorno', '')) like '%' || $${params.length} || '%'
+      )`);
+    }
+    const limit = filters?.limit ?? 50;
+    params.push(limit);
+    const where = clauses.length > 0 ? `where ${clauses.join(' and ')}` : '';
+    const res = await this.db.pool.query<{
+      source_key: string;
+      spreadsheet_id: string;
+      range_name: string;
+      kind: string;
+      row_id: string;
+      row_index: number;
+      title: string;
+      searchable_text: string;
+      payload: unknown;
+      updated_at: string;
+    }>(
+      `select source_key, spreadsheet_id, range_name, kind, row_id, row_index, title, searchable_text, payload, updated_at::text
+       from workspace_sheet_rows
+       ${where}
+       order by updated_at desc, row_index asc
+       limit $${params.length}`,
+      params
+    );
+    return res.rows.map((row) => ({
+      sourceKey: row.source_key,
+      spreadsheetId: row.spreadsheet_id,
+      rangeName: row.range_name,
+      kind: row.kind,
+      rowId: row.row_id,
+      rowIndex: row.row_index,
+      title: row.title,
+      searchableText: row.searchable_text,
+      payload: safeJson<Record<string, string>>(row.payload) ?? {},
+      updatedAt: row.updated_at,
+    }));
+  }
+
+  async replaceWorkspaceCalendarEvents(sourceKey: string, events: WorkspaceCalendarEventRecord[], opts?: { merge?: boolean }): Promise<void> {
+    if (!(await this.ensureReady()) || !this.db) return;
+    const merge = opts?.merge ?? false;
+    const client = await this.db.pool.connect();
+    try {
+      await client.query('begin');
+      if (!merge) {
+        await client.query('delete from workspace_calendar_events where source_key = $1', [sourceKey]);
+      }
+      for (const event of events) {
+        await client.query(
+          `insert into workspace_calendar_events (source_key, calendar_id, event_id, kind, summary, starts_at, ends_at, attendees, searchable_text, payload, updated_at)
+           values ($1,$2,$3,$4,$5,$6::timestamptz,$7::timestamptz,$8::jsonb,$9,$10::jsonb,$11::timestamptz)
+           on conflict (source_key, event_id) do update
+           set calendar_id=excluded.calendar_id,
+               kind=excluded.kind,
+               summary=excluded.summary,
+               starts_at=excluded.starts_at,
+               ends_at=excluded.ends_at,
+               attendees=excluded.attendees,
+               searchable_text=excluded.searchable_text,
+               payload=excluded.payload,
+               updated_at=excluded.updated_at`,
+          [
+            event.sourceKey,
+            event.calendarId,
+            event.eventId,
+            event.kind,
+            event.summary,
+            event.startsAt ?? null,
+            event.endsAt ?? null,
+            JSON.stringify(event.attendees ?? []),
+            event.searchableText,
+            JSON.stringify(event.payload ?? {}),
+            event.updatedAt,
+          ]
+        );
+      }
+      await client.query('commit');
+    } catch (error) {
+      await client.query('rollback');
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async loadWorkspaceCalendarEvents(filters?: { kind?: string; query?: string; fromIso?: string; toIso?: string; limit?: number }): Promise<WorkspaceCalendarEventRecord[]> {
+    if (!(await this.ensureReady()) || !this.db) return [];
+    const clauses: string[] = [];
+    const params: unknown[] = [];
+    if (filters?.kind) {
+      params.push(filters.kind);
+      clauses.push(`kind = $${params.length}`);
+    }
+    if (filters?.query) {
+      params.push(`%${filters.query.toLowerCase()}%`);
+      clauses.push(`lower(searchable_text) like $${params.length}`);
+    }
+    if (filters?.fromIso) {
+      params.push(filters.fromIso);
+      clauses.push(`coalesce(starts_at, updated_at) >= $${params.length}::timestamptz`);
+    }
+    if (filters?.toIso) {
+      params.push(filters.toIso);
+      clauses.push(`coalesce(starts_at, updated_at) <= $${params.length}::timestamptz`);
+    }
+    const limit = filters?.limit ?? 50;
+    params.push(limit);
+    const where = clauses.length > 0 ? `where ${clauses.join(' and ')}` : '';
+    const res = await this.db.pool.query<{
+      source_key: string;
+      calendar_id: string;
+      event_id: string;
+      kind: string;
+      summary: string;
+      starts_at: string | null;
+      ends_at: string | null;
+      attendees: unknown;
+      searchable_text: string;
+      payload: unknown;
+      updated_at: string;
+    }>(
+      `select source_key, calendar_id, event_id, kind, summary, starts_at::text, ends_at::text, attendees, searchable_text, payload, updated_at::text
+       from workspace_calendar_events
+       ${where}
+       order by coalesce(starts_at, updated_at) asc
+       limit $${params.length}`,
+      params
+    );
+    return res.rows.map((row) => ({
+      sourceKey: row.source_key,
+      calendarId: row.calendar_id,
+      eventId: row.event_id,
+      kind: row.kind,
+      summary: row.summary,
+      startsAt: row.starts_at ?? undefined,
+      endsAt: row.ends_at ?? undefined,
+      attendees: safeJson<Array<{ email?: string; displayName?: string; responseStatus?: string }>>(row.attendees) ?? [],
+      searchableText: row.searchable_text,
+      payload: safeJson<Record<string, unknown>>(row.payload) ?? {},
+      updatedAt: row.updated_at,
+    }));
+  }
+
+  async loadWorkspaceOverview(): Promise<WorkspaceOverviewRecord> {
+    if (!(await this.ensureReady()) || !this.db) {
+      return {
+        configured: false,
+        lastSyncAt: undefined,
+        sheetRows: 0,
+        calendarEvents: 0,
+        shiftRowsToday: 0,
+        upcomingMeetings: 0,
+      };
+    }
+    const todayIso = new Date().toISOString().slice(0, 10);
+    const [summary, lastRun] = await Promise.all([
+      this.db.pool.query<{
+        sheet_rows: string;
+        calendar_events: string;
+        shift_rows_today: string;
+        upcoming_meetings: string;
+      }>(
+        `select
+          (select count(*)::text from workspace_sheet_rows) as sheet_rows,
+          (select count(*)::text from workspace_calendar_events) as calendar_events,
+          (select count(*)::text from workspace_sheet_rows
+            where kind = 'shifts'
+              and (
+                lower(coalesce(payload->>'date', '')) like '%' || $1 || '%'
+                or lower(coalesce(payload->>'data', '')) like '%' || $1 || '%'
+                or lower(coalesce(payload->>'day', '')) like '%' || $1 || '%'
+                or lower(coalesce(payload->>'giorno', '')) like '%' || $1 || '%'
+              )) as shift_rows_today,
+          (select count(*)::text from workspace_calendar_events
+            where (kind = 'meetings' or attendees <> '[]'::jsonb)
+              and coalesce(starts_at, updated_at) >= now()) as upcoming_meetings`,
+        [todayIso]
+      ),
+      this.db.pool.query<{ finished_at: string | null }>(
+        `select finished_at::text
+         from workspace_sync_runs
+         where status = 'completed'
+         order by finished_at desc nulls last
+         limit 1`
+      ),
+    ]);
+    return {
+      configured: true,
+      lastSyncAt: lastRun.rows[0]?.finished_at ?? undefined,
+      sheetRows: Number(summary.rows[0]?.sheet_rows ?? 0),
+      calendarEvents: Number(summary.rows[0]?.calendar_events ?? 0),
+      shiftRowsToday: Number(summary.rows[0]?.shift_rows_today ?? 0),
+      upcomingMeetings: Number(summary.rows[0]?.upcoming_meetings ?? 0),
+    };
+  }
+
   async snapshotCounts(): Promise<Record<string, number>> {
     if (!(await this.ensureReady()) || !this.db) return {};
     const tables = [
@@ -254,6 +722,11 @@ export class PostgresMirror {
       'admin_settings',
       'channel_dispatches',
       'media_jobs',
+      'channel_control_peers',
+      'channel_control_events',
+      'workspace_sync_runs',
+      'workspace_sheet_rows',
+      'workspace_calendar_events',
     ];
     const out: Record<string, number> = {};
     for (const table of tables) {

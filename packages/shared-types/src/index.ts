@@ -7,6 +7,7 @@ export type EventType =
   | 'assistance.ticket.closed'
   | 'assistance.ticket.outcome'
   | 'inbound.email.received'
+  | 'inbound.telegram.received'
   | 'inbound.whatsapp.received'
   | 'danea.invoice.ingested'
   | 'offer.promo.ingested'
