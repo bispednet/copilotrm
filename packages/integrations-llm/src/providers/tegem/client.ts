@@ -204,15 +204,18 @@ export function createTeGemClient(config: TeGemProviderConfig): LLMClient {
 
         const stream = runtime.provider.streamResponse(page, baseline);
         let latest = '';
+        let accumulated = '';
         while (true) {
           const next: IteratorResult<string, { text: string }> = await stream.next();
           if (next.done) {
-            latest = next.value.text.trim();
+            latest = next.value.text.trim() || accumulated.trim();
             break;
           }
           const chunk = next.value.trim();
-          if (chunk && chunk !== latest) {
-            latest = chunk;
+          if (chunk) {
+            accumulated += chunk;
+            latest = accumulated.trim();
+            if (!latest) continue;
             yield { content: latest };
           }
         }

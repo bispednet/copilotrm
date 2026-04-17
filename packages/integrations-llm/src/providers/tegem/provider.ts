@@ -95,12 +95,14 @@ export class GeminiProvider {
 
   async sendPrompt(page: Page, prompt: string): Promise<void> {
     await this.ensureReady(page);
-    await this.waitUntilIdle(page, 20_000);
+    if (await this.isBusy(page).catch(() => false)) {
+      await this.waitUntilIdle(page, 7_000);
+    }
 
     // Wait for Angular to finish replacing DOM elements after page load.
     // We verify the input is STABLE (same element) for two consecutive checks
     // before trusting it with click+type operations.
-    const input = await this.waitForStableInput(page, 6_000);
+    const input = await this.waitForStableInput(page, 2_500);
     if (!input) throw new Error("Input Gemini non trovato.");
 
     await input.click();
@@ -497,7 +499,7 @@ export class GeminiProvider {
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
       if (!(await this.isBusy(page))) return;
-      await sleep(300);
+      await sleep(120);
     }
     throw new Error("Gemini occupato; impossibile inviare il prompt.");
   }
@@ -511,7 +513,7 @@ export class GeminiProvider {
   private async waitForStableInput(page: Page, timeoutMs: number): Promise<import("playwright").Locator | null> {
     const selectors = [this.config.inputSelector, ...this.config.readySelectors];
     const deadline = Date.now() + timeoutMs;
-    const stabilityDelayMs = 120;
+    const stabilityDelayMs = 60;
 
     let prevHandle: import("playwright").JSHandle | null = null;
 
@@ -600,7 +602,7 @@ export class GeminiProvider {
 
     for (let attempt = 0; attempt < 4; attempt++) {
       if (await looksSubmitted()) return;
-      await sleep(90);
+      await sleep(45);
       if (await looksSubmitted()) return;
 
       const freshInput = await this.firstVisibleLocator(
@@ -616,7 +618,7 @@ export class GeminiProvider {
 
       for (const key of keys) {
         await freshInput.press(key).catch(() => undefined);
-        await sleep(120);
+        await sleep(70);
         if (await looksSubmitted()) return;
       }
 

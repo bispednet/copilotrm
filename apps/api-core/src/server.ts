@@ -22,7 +22,7 @@ import { EmailChannelAdapter } from '@bisp/integrations-email';
 import { MediaGenerationServiceStub } from '@bisp/integrations-media';
 import { fetchAllRssFeeds, type RssItem, type RssSource } from '@bisp/integrations-rss';
 import { SocialChannelAdapter } from '@bisp/integrations-social';
-import { TelcoIngestService, type TelcoIngestResult } from '@bisp/integrations-telco';
+import { TelcoIngestService, type TelcoCoverageLookup, type TelcoIngestResult } from '@bisp/integrations-telco';
 import { TelegramChannelAdapter } from '@bisp/integrations-telegram';
 import { WhatsAppChannelAdapter } from '@bisp/integrations-whatsapp';
 import { HardwareQuoteChain } from '@bisp/integrations-hardware';
@@ -477,6 +477,41 @@ function extractLikelyCustomerName(text: string): string | undefined {
   if (explicit?.[1]) return explicit[1].trim();
   const generic = stripped.match(/\b([A-ZÀ-Ý][A-Za-zÀ-ÿ'’.-]+(?:\s+[A-ZÀ-Ý][A-Za-zÀ-ÿ'’.-]+){1,2})\b/);
   return generic?.[1]?.trim() || undefined;
+}
+
+function extractLikelyAddress(text: string): string | undefined {
+  const cleaned = stripText(text).replace(/\s+/g, ' ').trim();
+  const addressMatch = cleaned.match(
+    /\b(?:indirizzo[:\s-]*)?((?:via|viale|piazza|corso|largo|vicolo|strada|contrada|piazzale|localita|località|traversa)\s+[A-Za-zÀ-ÿ0-9'’./ -]{4,140})/i,
+  );
+  if (!addressMatch?.[1]) return undefined;
+  const candidate = addressMatch[1]
+    .split(/\b(?:telefono|cellulare|email|pod|pdr|offerta|problema|ticket|cliente)\b/i)[0]
+    ?.replace(/[.;:]+$/, '')
+    ?.trim();
+  return candidate && candidate.length >= 8 ? candidate : undefined;
+}
+
+function shouldAttemptTelcoCoverageLookup(text: string): boolean {
+  return /\b(copertura|fibra|ftth|fttc|fwa|adsl|telefonia|connettivita|connettività|router|wifi|wi-fi)\b/i.test(text);
+}
+
+function formatTelcoCoverageContext(lookup: TelcoCoverageLookup): string {
+  const lines = [
+    '=== VERIFICA COPERTURA FIBRA / CONNETTIVITA ===',
+    `Fonte: BUL ufficiale | regione ${lookup.matchedRegion} | comune ${lookup.matchedCity}`,
+    `Query: ${lookup.normalizedAddress}`,
+    `Portale: ${lookup.officialSearchUrl}`,
+  ];
+  if (lookup.fixedLineHint) lines.push(`Numero fisso associato nel testo: ${lookup.fixedLineHint}`);
+  if (lookup.candidates.length > 0) {
+    lines.push('Candidati civico trovati:');
+    lookup.candidates.slice(0, 3).forEach((candidate, index) => {
+      lines.push(`- #${index + 1} ${candidate.fullAddress} | score ${candidate.score.toFixed(1)} | id ${candidate.addressId}`);
+    });
+  }
+  if (lookup.note) lines.push(`Nota: ${lookup.note}`);
+  return lines.join('\n');
 }
 
 function formatMoney(value?: number): string | undefined {
@@ -1224,6 +1259,27 @@ export type ChatSSEEvent =
 function buildAgentSystemPrompt(agentName: string, characterStudio: CharacterStudioRepository): { prompt: string; role: string } {
   const key = AGENT_CHARACTER_KEY[agentName];
   const profile = key ? characterStudio.get(key) : undefined;
+  const extraInstructions: string[] = [];
+  if (agentName === 'Orchestratore') {
+    extraInstructions.push(
+      'Dopo il primo giro leggi tutta la discussione: se i dati sono sufficienti tagga esplicitamente @Moderatore; se non lo sono, tagga solo gli agenti che devono approfondire e poni domande precise.',
+    );
+  }
+  if (agentName === 'Moderatore') {
+    extraInstructions.push(
+      'Intervieni solo quando l’Orchestratore ha già chiuso l’analisi. La tua risposta finale deve contenere: sintesi operativa, azione immediata, esecuzione suggerita (preventivo, messaggio team, follow-up o task), e dati mancanti se restano blocchi.',
+    );
+  }
+  if (agentName === 'Telefonia') {
+    extraInstructions.push(
+      'Se nel contesto esiste una verifica copertura ufficiale, usala esplicitamente. Se manca l’indirizzo o il civico, chiedilo; non dichiarare coperture non verificate.',
+    );
+  }
+  if (agentName === 'Commerciale') {
+    extraInstructions.push(
+      'Usa solo offerte attive e prodotti realmente presenti nel contesto. Non anticipare bundle o hardware costosi finché i trigger tecnici/commerciali non sono validati.',
+    );
+  }
   if (profile) {
     const parts = [
       `Sei ${profile.name}, ${profile.role} in CopilotRM.`,
@@ -1231,13 +1287,14 @@ function buildAgentSystemPrompt(agentName: string, characterStudio: CharacterStu
       profile.goals.length ? `Obiettivi: ${profile.goals.join('; ')}.` : '',
       profile.limits.length ? `Limiti: ${profile.limits.join('; ')}.` : '',
       profile.systemInstructions || '',
+      extraInstructions.join(' '),
       'Rispondi in italiano.',
     ].filter(Boolean).join(' ');
     return { prompt: parts, role: profile.role };
   }
   const fallbackRole = 'agente specialistico CopilotRM';
   return {
-    prompt: `Sei ${agentName}, ${fallbackRole}. Rispondi in modo preciso e orientato all'azione. Rispondi in italiano.`,
+    prompt: `Sei ${agentName}, ${fallbackRole}. ${extraInstructions.join(' ')} Rispondi in modo preciso e orientato all'azione. Rispondi in italiano.`,
     role: fallbackRole,
   };
 }
@@ -1250,7 +1307,8 @@ function buildAgentDataContext(
   customerResolutions: CustomerResolutionCase[],
   customerOpportunities: CustomerOpportunity[],
   activeOffers: ProductOffer[],
-  activeObjectives: ManagerObjective[]
+  activeObjectives: ManagerObjective[],
+  telcoCoverage?: TelcoCoverageLookup | null,
 ): string {
   const lines: string[] = [];
 
@@ -1330,6 +1388,10 @@ function buildAgentDataContext(
     });
   }
 
+  if (telcoCoverage && ['Orchestratore', 'Telefonia', 'Commerciale', 'Moderatore', 'Assistenza'].includes(agentName)) {
+    lines.push(`\n${formatTelcoCoverageContext(telcoCoverage)}`);
+  }
+
   // Obiettivi manager (per agenti commerciali)
   if (['Commerciale', 'Telefonia', 'Energia', 'Hardware'].includes(agentName) && activeObjectives.length > 0) {
     lines.push('\n=== OBIETTIVI MANAGER ===');
@@ -1388,7 +1450,8 @@ async function runAgentTurn(params: {
  * 3. Agenti extra taggati → rispondono con contesto completo
  * 4. Critico → adversarial review sui dati reali
  * 5. Difesa → agenti sfidati si difendono
- * 6. Moderatore → sintesi finale (NON nel thread, solo come `synthesis`)
+ * 6. Orchestratore review → decide se chiudere o richiedere altri approfondimenti mirati
+ * 7. Moderatore → sintesi finale (NON nel thread, solo come `synthesis`)
  *
  * Callbacks onTyping/onMessage permettono streaming SSE al frontend.
  */
@@ -1401,6 +1464,7 @@ async function runChatOrchestration(params: {
   customerOpportunities: CustomerOpportunity[];
   activeOffers: ProductOffer[];
   activeObjectives: ManagerObjective[];
+  telcoCoverage?: TelcoCoverageLookup | null;
   characterStudio: CharacterStudioRepository;
   conversationHistory?: Array<{ role: 'user' | 'assistant'; content: string }>;
   llmSessionNamespace?: string;
@@ -1419,6 +1483,7 @@ async function runChatOrchestration(params: {
     customerOpportunities,
     activeOffers,
     activeObjectives,
+    telcoCoverage,
     characterStudio,
     conversationHistory,
     llmSessionNamespace = 'frontend',
@@ -1438,7 +1503,16 @@ async function runChatOrchestration(params: {
     sessionLabel: `${llmSessionNamespace} · ${agentName}`,
   });
 
-  const sharedDataCtx = buildAgentDataContext('Orchestratore', customer, customerTickets, customerResolutions, customerOpportunities, activeOffers, activeObjectives);
+  const sharedDataCtx = buildAgentDataContext(
+    'Orchestratore',
+    customer,
+    customerTickets,
+    customerResolutions,
+    customerOpportunities,
+    activeOffers,
+    activeObjectives,
+    telcoCoverage,
+  );
   const agentList = CHAT_AGENTS_LIST.map((n) => {
     const key = AGENT_CHARACTER_KEY[n];
     const p = key ? characterStudio.get(key) : undefined;
@@ -1500,7 +1574,7 @@ async function runChatOrchestration(params: {
 
   for (const agentName of involvedAgents) {
     const { prompt: sysPrompt, role: agentRole } = buildAgentSystemPrompt(agentName, characterStudio);
-    const domainData = buildAgentDataContext(agentName, customer, customerTickets, customerResolutions, customerOpportunities, activeOffers, activeObjectives);
+    const domainData = buildAgentDataContext(agentName, customer, customerTickets, customerResolutions, customerOpportunities, activeOffers, activeObjectives, telcoCoverage);
 
     let content = `[${agentName} non disponibile]`;
     try {
@@ -1534,7 +1608,7 @@ async function runChatOrchestration(params: {
   // ── Step 3: Agenti extra taggati — sequenziali ──────────────────────────────
   for (const agentName of [...extraAgentsCalled].slice(0, 2)) {
     const { prompt: sysPrompt, role: agentRole } = buildAgentSystemPrompt(agentName, characterStudio);
-    const domainData = buildAgentDataContext(agentName, customer, customerTickets, customerResolutions, customerOpportunities, activeOffers, activeObjectives);
+    const domainData = buildAgentDataContext(agentName, customer, customerTickets, customerResolutions, customerOpportunities, activeOffers, activeObjectives, telcoCoverage);
 
     let content = `[${agentName} non disponibile]`;
     try {
@@ -1592,7 +1666,7 @@ async function runChatOrchestration(params: {
   // ── Step 5: Difesa — sequenziale ────────────────────────────────────────────
   for (const agentName of criticMentions.slice(0, 2)) {
     const { prompt: sysPrompt, role: agentRole } = buildAgentSystemPrompt(agentName, characterStudio);
-    const domainData = buildAgentDataContext(agentName, customer, customerTickets, customerResolutions, customerOpportunities, activeOffers, activeObjectives);
+    const domainData = buildAgentDataContext(agentName, customer, customerTickets, customerResolutions, customerOpportunities, activeOffers, activeObjectives, telcoCoverage);
 
     let content = `[${agentName} non disponibile]`;
     try {
@@ -1617,7 +1691,90 @@ async function runChatOrchestration(params: {
     onMessage?.(msg);
   }
 
-  // ── Step 6: Moderatore — SOLO come synthesis, NON nel thread ────────────────
+  // ── Step 6: Revisione finale Orchestratore → se serve nuove richieste mirate ─
+  const runOrchestratorReview = async (round: number): Promise<{ content: string; mentions: string[] }> => {
+    const reviewContent = await runAgentTurn({
+      llm,
+      messages: [
+        {
+          role: 'system',
+          content: `${orchPrompt}\n\nDopo aver letto l'intera discussione devi decidere il passo successivo. Se l'analisi è sufficiente tagga esplicitamente @Moderatore. Se mancano dati o verifiche, tagga solo gli agenti che devono approfondire e poni una richiesta precisa per ciascuno.`,
+        },
+        { role: 'user', content: `Richiesta: "${message}"\n\n${sharedDataCtx}${threadSummary()}` },
+      ],
+      opts: llmOptsFor('Orchestratore', { tier: 'small', maxTokens: 180 }),
+      agent: 'Orchestratore',
+      agentRole: orchRole,
+      kind: 'brief',
+      round,
+      onTyping,
+      onChunk,
+    });
+    const mentions = extractMentions(reviewContent);
+    const reviewMsg: ChatSwarmMsg = {
+      agent: 'Orchestratore',
+      agentRole: orchRole,
+      content: reviewContent,
+      kind: 'brief',
+      mentions,
+      round,
+    };
+    thread.push(reviewMsg);
+    onMessage?.(reviewMsg);
+    return { content: reviewContent, mentions };
+  };
+
+  let orchestratorDecision = '';
+  let reviewMentions: string[] = [];
+  for (let cycle = 0; cycle < 2; cycle++) {
+    const round = 4 + cycle * 2;
+    const review = await runOrchestratorReview(round);
+    orchestratorDecision = review.content;
+    reviewMentions = review.mentions;
+
+    const followUpAgents = reviewMentions.filter((agentName) => agentName !== 'Moderatore');
+    const readyForModerator = reviewMentions.includes('Moderatore') || followUpAgents.length === 0;
+    if (readyForModerator) break;
+
+    for (const agentName of followUpAgents.slice(0, 2)) {
+      const { prompt: sysPrompt, role: agentRole } = buildAgentSystemPrompt(agentName, characterStudio);
+      const domainData = buildAgentDataContext(agentName, customer, customerTickets, customerResolutions, customerOpportunities, activeOffers, activeObjectives, telcoCoverage);
+
+      let content = `[${agentName} non disponibile]`;
+      try {
+        content = await runAgentTurn({
+          llm,
+          messages: [
+            {
+              role: 'system',
+              content: `${sysPrompt}\n\nL'Orchestratore ti ha richiamato per un approfondimento mirato. Rispondi solo al punto richiesto, con dati verificati e conclusione operativa.`,
+            },
+            { role: 'user', content: `Ultima richiesta Orchestratore: ${orchestratorDecision}\n\n${threadSummary()}\n\n${domainData}` },
+          ],
+          opts: llmOptsFor(agentName, { tier: 'small', maxTokens: 140 }),
+          agent: agentName,
+          agentRole,
+          kind: 'analysis',
+          round: round + 1,
+          onTyping,
+          onChunk,
+        });
+      } catch { /* use fallback */ }
+
+      const msg: ChatSwarmMsg = {
+        agent: agentName,
+        agentRole,
+        content,
+        kind: 'analysis',
+        mentions: extractMentions(content),
+        round: round + 1,
+      };
+      thread.push(msg);
+      onMessage?.(msg);
+    }
+  }
+
+  // ── Step 7: Moderatore — SOLO come synthesis, NON nel thread ────────────────
   const { prompt: modPrompt, role: modRole } = buildAgentSystemPrompt('Moderatore', characterStudio);
   let synthesis = Object.entries(agentResponses).map(([a, c]) => `${a}: ${c}`).join('\n');
 
@@ -1626,13 +1783,16 @@ async function runChatOrchestration(params: {
       llm,
       messages: [
         { role: 'system', content: modPrompt },
-        { role: 'user', content: `Richiesta: "${message}"\n\n${sharedDataCtx}${threadSummary()}` },
+        {
+          role: 'user',
+          content: `Richiesta: "${message}"\n\nDecisione finale Orchestratore: ${orchestratorDecision || 'non disponibile'}\n\n${sharedDataCtx}${threadSummary()}`,
+        },
       ],
       opts: llmOptsFor('Moderatore', { tier: 'small', maxTokens: 220 }),
       agent: 'Moderatore',
       agentRole: modRole,
       kind: 'synthesis',
-      round: 4,
+      round: 8,
       onTyping,
       onChunk,
     });
@@ -4423,6 +4583,10 @@ export function buildServer(state = buildState()) {
       const customerOpportunities = customer ? state.customerOpportunities.list({ customerId: customer.id, limit: 20 }) : [];
       const activeOffers = state.offers.listActive();
       const activeObjectives = state.objectives.listActive();
+      const inferredAddress = shouldAttemptTelcoCoverageLookup(message) ? extractLikelyAddress(message) : undefined;
+      const telcoCoverage = inferredAddress
+        ? await new TelcoIngestService().lookupCoverageByAddress(inferredAddress).catch(() => null)
+        : null;
 
       // ── Orchestrazione con callbacks SSE ─────────────────────────────────
       let swarmThread: ChatSwarmMsg[] = [];
@@ -4437,6 +4601,7 @@ export function buildServer(state = buildState()) {
         customerOpportunities,
         activeOffers,
         activeObjectives,
+        telcoCoverage,
         characterStudio: state.characterStudio,
         conversationHistory: history,
         llmSessionNamespace:

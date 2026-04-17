@@ -336,13 +336,24 @@ function App() {
 
           } else if (event.type === 'chunk') {
             setTypingAgent({ agent: String(event.agent), agentRole: String(event.agentRole) });
-            setTypingDraft({
-              agent: String(event.agent),
-              agentRole: String(event.agentRole),
-              content: String(event.content ?? ''),
-              kind: String(event.kind ?? 'analysis') as SwarmThreadMsg['kind'],
-              mentions: [],
-              round: Number(event.round ?? 0),
+            setTypingDraft((prev) => {
+              const incomingAgent = String(event.agent);
+              const incomingRole = String(event.agentRole);
+              const incomingContent = String(event.content ?? '');
+              const nextContent =
+                prev && prev.agent === incomingAgent
+                  ? incomingContent.startsWith(prev.content)
+                    ? incomingContent
+                    : `${prev.content}${incomingContent}`
+                  : incomingContent;
+              return {
+                agent: incomingAgent,
+                agentRole: incomingRole,
+                content: nextContent,
+                kind: String(event.kind ?? 'analysis') as SwarmThreadMsg['kind'],
+                mentions: [],
+                round: Number(event.round ?? 0),
+              };
             });
 
           } else if (event.type === 'message') {

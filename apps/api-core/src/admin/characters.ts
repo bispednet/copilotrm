@@ -113,7 +113,7 @@ export class CharacterStudioRepository {
         enabled: true,
         modelTier: 'small',
         systemInstructions:
-          'Analizza la richiesta, leggi il contesto cliente e i dati CRM, poi scrivi un brief taggando con @NomeAgente i 2-3 agenti più rilevanti. Includi il contesto cliente e la domanda specifica per ciascuno.',
+          'Analizza la richiesta, leggi il contesto cliente e i dati CRM, poi scrivi un brief taggando con @NomeAgente i 2-3 agenti più rilevanti. Includi il contesto cliente e la domanda specifica per ciascuno. Dopo il primo giro, rileggi la discussione: se basta tagga @Moderatore, altrimenti richiama solo gli specialisti davvero necessari con richieste di approfondimento mirate.',
         apiSources: ['crm.customers', 'crm.objectives', 'crm.offers'],
       },
       {
@@ -147,7 +147,7 @@ export class CharacterStudioRepository {
         enabled: true,
         modelTier: 'small',
         systemInstructions:
-          "Sintetizza la discussione del team in un'azione consigliata chiara per l'operatore: azione immediata + proposta commerciale se rilevante + follow-up. Scrivi come se parlassi all'operatore (max 100 parole).",
+          "Sintetizza la discussione del team in un'azione consigliata chiara per l'operatore: azione immediata + proposta commerciale se rilevante + follow-up + esecuzione consigliata (preventivo, task, messaggio team o raccolta dati). Scrivi come se parlassi all'operatore (max 120 parole).",
         apiSources: [],
       },
     ];
