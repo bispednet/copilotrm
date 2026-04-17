@@ -1,3 +1,4 @@
+import { rm } from "node:fs/promises";
 import { mkdir } from "node:fs/promises";
 import path from "node:path";
 
@@ -11,6 +12,24 @@ Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
 Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
 Object.defineProperty(navigator, 'platform', { get: () => 'Win32' });
 `;
+
+async function sanitizeProfileLocks(profilePath: string): Promise<void> {
+  const candidates = [
+    path.join(profilePath, "SingletonLock"),
+    path.join(profilePath, "SingletonCookie"),
+    path.join(profilePath, "SingletonSocket"),
+    path.join(profilePath, "Default", "LOCK"),
+  ];
+  await Promise.all(
+    candidates.map(async (file) => {
+      try {
+        await rm(file, { force: true });
+      } catch {
+        // best effort
+      }
+    }),
+  );
+}
 
 export class GeminiSessionManager {
   private context: BrowserContext | null = null;
@@ -325,6 +344,7 @@ export class GeminiSessionManager {
   private async doLaunch(): Promise<BrowserContext> {
     const profilePath = this.resolveProfilePath("_shared");
     await mkdir(profilePath, { recursive: true });
+    await sanitizeProfileLocks(profilePath);
 
     const context = await chromium.launchPersistentContext(profilePath, {
       channel: this.config.browserExecutablePath ? undefined : this.config.browserChannel,

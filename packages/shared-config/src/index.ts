@@ -39,7 +39,16 @@ function readNumber(env: Record<string, string | undefined>, fallback: number, .
 }
 
 function resolveDefaultChromePath(): string | undefined {
-  const candidates = ['/usr/bin/google-chrome-stable', '/usr/bin/google-chrome'];
+  const homeDir = (
+    (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env?.HOME ??
+    '/home/funboy'
+  );
+  const candidates = [
+    path.join(homeDir, '.local/bin/google-chrome-stable'),
+    path.join(homeDir, '.local/share/tegem/browser/chrome-linux64/chrome'),
+    '/usr/bin/google-chrome-stable',
+    '/usr/bin/google-chrome',
+  ];
   return candidates.find((candidate) => existsSync(candidate));
 }
 
