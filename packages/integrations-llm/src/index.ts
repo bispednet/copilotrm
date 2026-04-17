@@ -3,6 +3,7 @@ export { createLLMClient } from './client.js';
 export { createOllamaClient } from './providers/ollama.js';
 export { createOpenAIClient } from './providers/openai.js';
 export { createAnthropicClient } from './providers/anthropic.js';
+export { createTeGemClient } from './providers/tegem/client.js';
 export type { EmbeddingClient } from './embedding.js';
 export {
   createOllamaEmbeddingClient,

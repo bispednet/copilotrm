@@ -1,6 +1,7 @@
 import { createAnthropicClient } from './providers/anthropic.js';
 import { createOpenAIClient } from './providers/openai.js';
 import { createOllamaClient } from './providers/ollama.js';
+import { createTeGemClient } from './providers/tegem/client.js';
 import type { LLMClient, LLMClientConfig, LLMMessage, LLMOptions, LLMResponse, ModelTier } from './types.js';
 
 type FallbackProvider = NonNullable<LLMClientConfig['fallback']>;
@@ -20,6 +21,8 @@ function pickModel(
       return tier === 'small' ? cfg.anthropicModelSmall : cfg.anthropicModelLarge;
     case 'deepseek':
       return tier === 'small' ? cfg.deepseekModelSmall : tier === 'medium' ? cfg.deepseekModelMedium : cfg.deepseekModelLarge;
+    case 'tegem':
+      return 'gemini-web';
     default:
       return 'unknown';
   }
@@ -46,6 +49,23 @@ function buildClient(
         baseUrl: cfg.deepseekApiUrl.replace(/\/v1\/?$/, ''), // normalizza — provider aggiunge /v1
         model: cfg.deepseekModelLarge,
         providerName: 'deepseek',
+      });
+    case 'tegem':
+      return createTeGemClient({
+        baseUrl: cfg.tegemBaseUrl,
+        headless: cfg.tegemHeadless,
+        browserChannel: cfg.tegemBrowserChannel,
+        browserExecutablePath: cfg.tegemBrowserExecutablePath,
+        baseProfileDir: cfg.tegemBaseProfileDir,
+        profileNamespace: cfg.tegemProfileNamespace,
+        sessionIdleTimeoutMs: cfg.tegemSessionIdleTimeoutMs,
+        conversationTtlMs: cfg.tegemConversationTtlMs,
+        maxSessionTabs: cfg.tegemMaxSessionTabs,
+        streamPollIntervalMs: cfg.tegemStreamPollIntervalMs,
+        streamStableTicks: cfg.tegemStreamStableTicks,
+        streamFirstChunkTimeoutMs: cfg.tegemStreamFirstChunkTimeoutMs,
+        streamMaxDurationMs: cfg.tegemStreamMaxDurationMs,
+        legacyProfileImportPath: cfg.tegemLegacyProfileImportPath,
       });
     default:
       return null;

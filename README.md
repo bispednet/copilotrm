@@ -30,7 +30,7 @@ packages/
   domain-*            Repository dominio (customers, offers, objectives, ...)
   orchestrator-*      Scoring, rules, handoff
   agents-*            Agenti business (assistance, preventivi, hardware, ...)
-  integrations-llm    Client LLM unificato (Ollama/OpenAI/Anthropic/DeepSeek)
+  integrations-llm    Client LLM unificato (Ollama/OpenAI/Anthropic/DeepSeek/TeGem)
   integrations-google-workspace Sheets + Calendar sync per agenda/turni/meeting
   integrations-*      Adapter canali e servizi esterni
   personas            Definizioni persona agenti
@@ -72,9 +72,14 @@ Vedere `.env.example` per la lista completa.
 | `BISPCRM_ROOT_DIR` | Root runtime progetto (default: cwd) |
 | `BISPCRM_MIGRATIONS_DIR` | Path migrazioni SQL |
 | `BISPCRM_RUNTIME_DATA_DIR` | Directory dati runtime (override di `COPILOTRM_DATA_DIR`) |
-| `LLM_PROVIDER` | Provider LLM primario: `ollama` \| `openai` \| `anthropic` \| `deepseek` |
+| `LLM_PROVIDER` | Provider LLM primario: `ollama` \| `openai` \| `anthropic` \| `deepseek` \| `tegem` |
 | `LLM_FALLBACK_PROVIDER` | Provider cloud di fallback |
 | `OLLAMA_SERVER_URL` | URL server Ollama locale |
+| `PLAYWRIGHT_BASE_PROFILE_DIR` | Directory profili Playwright/Gemini riusati da TeGem |
+| `PLAYWRIGHT_PROFILE_NAMESPACE` | Namespace profilo browser per le sessioni Gemini |
+| `PLAYWRIGHT_BROWSER_CHANNEL` | Channel Playwright opzionale (`chrome` solo se installato; vuoto = Chromium bundle) |
+| `PLAYWRIGHT_EXECUTABLE_PATH` | Path esplicito Chrome/Chromium per il provider TeGem |
+| `TEGEM_IMPORT_PROFILE_FROM` | Path legacy da cui importare cookie/sessioni Gemini già loggate |
 | `BISPCRM_CHANNEL_GATEWAY_URL` | URL gateway-channels per dispatch canali |
 | `API_CORE_URL` | Alias compatibile URL api-core per worker/gateway |
 | `BISPCRM_CHANNEL_DISPATCH_MODE` | `gateway-first` \| `gateway-only` \| `local-only` |
@@ -191,12 +196,21 @@ POST /api/orchestrate
 Provider supportati con strategia **local-first + cloud fallback**:
 
 - **Ollama** (locale/LAN) — default, nessun costo, latenza rete locale
+- **TeGem** (Gemini via Playwright + tab browser persistenti) — usa sessioni browser già autenticate, ottimo per operator workflows e swarm condiviso
 - **DeepSeek** — fallback economico
 - **OpenAI** — fallback standard
 - **Anthropic** — fallback alternativo
 
 Se il provider primario non risponde (timeout/ECONNREFUSED) si tenta il fallback.
 Se anche il fallback fallisce il sistema usa template string — non crasha mai.
+
+### Session model con TeGem
+
+- **WhatsApp** usa una sessione condivisa per canale/agent, così tutti gli utenti del gruppo aziendale convergono sugli stessi tab Gemini.
+- **Telegram** usa la stessa logica di channel session condivisa.
+- **Frontend / orchestrazione CRM** usa una sessione distinta per ogni agente del repo, così ogni ruolo mantiene il proprio thread Gemini.
+- I profili Playwright possono essere importati da un repo esterno già loggato, evitando nuovi login manuali.
+- Se `PLAYWRIGHT_BROWSER_CHANNEL` e `PLAYWRIGHT_EXECUTABLE_PATH` sono vuoti, il provider usa Chromium installato da Playwright.
 
 ---
 

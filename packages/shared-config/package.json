@@ -10,5 +10,8 @@
     "dev": "tsc -p tsconfig.json --watch",
     "lint": "echo 'lint placeholder: shared-config'",
     "test": "echo 'test placeholder: shared-config'"
+  },
+  "devDependencies": {
+    "@types/node": "^24.7.2"
   }
 }

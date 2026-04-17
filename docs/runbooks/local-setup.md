@@ -14,6 +14,28 @@
 3. `curl http://localhost:4010/health`
 4. `curl -X POST http://localhost:4010/api/scenarios/repairNotWorth/run`
 
+## TeGem / Gemini via Playwright
+
+Per usare Gemini tabs al posto di Ollama:
+
+```bash
+export LLM_PROVIDER=tegem
+export PLAYWRIGHT_HEADLESS=false
+export PLAYWRIGHT_BROWSER_CHANNEL=
+export PLAYWRIGHT_BASE_PROFILE_DIR=/home/funboy/copilotrm/.playwright/profiles
+export PLAYWRIGHT_PROFILE_NAMESPACE=chrome-stable
+export TEGEM_IMPORT_PROFILE_FROM=/home/funboy/TeGem/.playwright/profiles
+```
+
+Note operative:
+
+- `LLM_PROVIDER=tegem` sostituisce Ollama come provider primario.
+- Il provider riusa i cookie/sessioni Chrome già presenti nel profilo Playwright.
+- Se non hai Chrome di sistema, lascia `PLAYWRIGHT_BROWSER_CHANNEL` vuoto: userà Chromium installato da Playwright.
+- WhatsApp e Telegram convergono su sessioni Gemini condivise lato canale.
+- Il frontend/orchestrator usa una sessione Gemini distinta per ciascun agente del CRM.
+- Il profilo importato non va versionato: `.playwright/` è escluso da git.
+
 ## Infra (Postgres + Redis) - Docker opzionale
 
 Se NON usate Docker (caso tipico on-prem/LAN), usate servizi locali di sistema:

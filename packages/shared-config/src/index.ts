@@ -1,4 +1,6 @@
 import type { LLMClientConfig } from '@bisp/integrations-llm';
+import { existsSync } from 'node:fs';
+import path from 'node:path';
 
 export type { LLMClientConfig };
 
@@ -25,6 +27,29 @@ function pick(env: Record<string, string | undefined>, ...keys: string[]): strin
   return undefined;
 }
 
+function readBoolean(env: Record<string, string | undefined>, fallback: boolean, ...keys: string[]): boolean {
+  const value = pick(env, ...keys);
+  if (value === undefined) return fallback;
+  return ['1', 'true', 'yes', 'on'].includes(value.toLowerCase());
+}
+
+function readNumber(env: Record<string, string | undefined>, fallback: number, ...keys: string[]): number {
+  const value = Number(pick(env, ...keys));
+  return Number.isFinite(value) && value > 0 ? value : fallback;
+}
+
+function resolveDefaultChromePath(): string | undefined {
+  const candidates = ['/usr/bin/google-chrome-stable', '/usr/bin/google-chrome'];
+  return candidates.find((candidate) => existsSync(candidate));
+}
+
+function resolveProfileNamespace(browserChannel?: string, executablePath?: string, explicit?: string): string {
+  if (explicit?.trim()) return explicit.trim();
+  if (executablePath?.includes('google-chrome')) return 'chrome-stable';
+  if (browserChannel) return browserChannel;
+  return 'chromium';
+}
+
 export function loadConfig(
   env: Record<string, string | undefined> = (
     (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env ?? {}
@@ -38,6 +63,14 @@ export function loadConfig(
   const channelGatewayTimeoutMs = Number(pick(env, 'BISPCRM_CHANNEL_GATEWAY_TIMEOUT_MS') ?? 5000);
   const primary = (pick(env, 'LLM_PROVIDER') ?? 'ollama') as LLMClientConfig['primary'];
   const fallback = pick(env, 'LLM_FALLBACK_PROVIDER') as LLMClientConfig['fallback'] | undefined;
+  const browserChannel = pick(env, 'PLAYWRIGHT_BROWSER_CHANNEL');
+  const browserExecutablePath = pick(env, 'PLAYWRIGHT_EXECUTABLE_PATH') ?? resolveDefaultChromePath();
+  const profileNamespace = resolveProfileNamespace(
+    browserChannel,
+    browserExecutablePath,
+    pick(env, 'PLAYWRIGHT_PROFILE_NAMESPACE'),
+  );
+  const defaultProfileDir = path.resolve(rootDir, '.playwright/profiles');
 
   return {
     apiPort: Number(env.PORT_API_CORE ?? 4010),
@@ -48,7 +81,7 @@ export function loadConfig(
     dataDir,
     channelGatewayUrl,
     channelGatewayTimeoutMs: Number.isFinite(channelGatewayTimeoutMs) && channelGatewayTimeoutMs > 0 ? channelGatewayTimeoutMs : 5000,
-    llmProvider: primary === 'ollama' ? 'local' : 'api',
+    llmProvider: primary === 'ollama' || primary === 'tegem' ? 'local' : 'api',
     llm: {
       primary,
       fallback,
@@ -89,6 +122,24 @@ export function loadConfig(
         pick(env, 'MEDIUM_DEEPSEEK_MODEL', 'DEEPSEEK_MODEL_MEDIUM') ?? 'deepseek-chat',
       deepseekModelLarge:
         pick(env, 'LARGE_DEEPSEEK_MODEL', 'DEEPSEEK_MODEL_LARGE', 'DEEPSEEK_MODEL_CHAT') ?? 'deepseek-chat',
+
+      // ── TeGem / Gemini via Playwright ─────────────────────────────────────
+      tegemBaseUrl: pick(env, 'TEGEM_BASE_URL') ?? 'https://gemini.google.com/app',
+      tegemHeadless: readBoolean(env, false, 'PLAYWRIGHT_HEADLESS', 'TEGEM_HEADLESS'),
+      tegemBrowserChannel: browserChannel,
+      tegemBrowserExecutablePath: browserExecutablePath,
+      tegemBaseProfileDir:
+        path.resolve(rootDir, pick(env, 'PLAYWRIGHT_BASE_PROFILE_DIR', 'TEGEM_BASE_PROFILE_DIR') ?? defaultProfileDir),
+      tegemProfileNamespace: profileNamespace,
+      tegemSessionIdleTimeoutMs: readNumber(env, 30 * 60_000, 'SESSION_IDLE_TIMEOUT_MS', 'TEGEM_SESSION_IDLE_TIMEOUT_MS'),
+      tegemConversationTtlMs: readNumber(env, 24 * 60 * 60_000, 'SESSION_CONVERSATION_TTL_MS', 'TEGEM_SESSION_CONVERSATION_TTL_MS'),
+      tegemMaxSessionTabs: readNumber(env, 20, 'MAX_SESSION_TABS', 'TEGEM_MAX_SESSION_TABS'),
+      tegemStreamPollIntervalMs: readNumber(env, 700, 'STREAM_POLL_INTERVAL_MS', 'TEGEM_STREAM_POLL_INTERVAL_MS'),
+      tegemStreamStableTicks: readNumber(env, 4, 'STREAM_STABLE_TICKS', 'TEGEM_STREAM_STABLE_TICKS'),
+      tegemStreamFirstChunkTimeoutMs: readNumber(env, 25_000, 'STREAM_FIRST_CHUNK_TIMEOUT_MS', 'TEGEM_STREAM_FIRST_CHUNK_TIMEOUT_MS'),
+      tegemStreamMaxDurationMs: readNumber(env, 90_000, 'STREAM_MAX_DURATION_MS', 'TEGEM_STREAM_MAX_DURATION_MS'),
+      tegemLegacyProfileImportPath:
+        pick(env, 'TEGEM_IMPORT_PROFILE_FROM') ?? path.resolve(rootDir, '..', 'TeGem', '.playwright', 'profiles'),
     },
   };
 }

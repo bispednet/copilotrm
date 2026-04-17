@@ -6,5 +6,6 @@ coverage
 .env
 .env.*
 !.env.example
+.playwright
 *.log
 .DS_Store

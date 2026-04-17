@@ -11,6 +11,8 @@ export interface LLMOptions {
   tier?: ModelTier;
   maxTokens?: number;
   temperature?: number;
+  sessionKey?: string;
+  sessionLabel?: string;
 }
 
 export interface LLMResponse {
@@ -28,8 +30,8 @@ export interface LLMClient {
 
 /** Configurazione provider LLM — definita qui, riusata da shared-config */
 export interface LLMClientConfig {
-  primary: 'ollama' | 'openai' | 'anthropic' | 'deepseek';
-  fallback?: 'openai' | 'anthropic' | 'deepseek';
+  primary: 'ollama' | 'openai' | 'anthropic' | 'deepseek' | 'tegem';
+  fallback?: 'ollama' | 'openai' | 'anthropic' | 'deepseek' | 'tegem';
 
   // Ollama
   ollamaUrl: string;
@@ -54,4 +56,20 @@ export interface LLMClientConfig {
   deepseekModelSmall: string;
   deepseekModelMedium: string;
   deepseekModelLarge: string;
+
+  // TeGem / Gemini via Playwright
+  tegemBaseUrl: string;
+  tegemHeadless: boolean;
+  tegemBrowserChannel?: string;
+  tegemBrowserExecutablePath?: string;
+  tegemBaseProfileDir: string;
+  tegemProfileNamespace: string;
+  tegemSessionIdleTimeoutMs: number;
+  tegemConversationTtlMs: number;
+  tegemMaxSessionTabs: number;
+  tegemStreamPollIntervalMs: number;
+  tegemStreamStableTicks: number;
+  tegemStreamFirstChunkTimeoutMs: number;
+  tegemStreamMaxDurationMs: number;
+  tegemLegacyProfileImportPath?: string;
 }
