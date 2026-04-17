@@ -103,6 +103,16 @@ export function createLLMClient(cfg: LLMClientConfig): LLMClient {
     provider: effectivePrimary?.provider ?? 'none',
     model: effectivePrimary?.model ?? 'none',
 
+    async prewarmSessions(sessions: LLMOptions[]): Promise<void> {
+      if (primary?.prewarmSessions) {
+        await primary.prewarmSessions(sessions);
+        return;
+      }
+      if (fallback?.prewarmSessions) {
+        await fallback.prewarmSessions(sessions);
+      }
+    },
+
     async chat(messages: LLMMessage[], opts?: LLMOptions): Promise<LLMResponse> {
       // Risolve il modello in base al tier se non specificato esplicitamente
       const tier = opts?.tier ?? 'large';
