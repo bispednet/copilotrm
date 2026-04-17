@@ -121,7 +121,12 @@ export async function buildOneToOneDraftsForOffer(params: {
         try {
           const persona = personas.preventivi as CopilotRMPersona;
           const msgs = buildOneToOneMessagePrompt({ customer: t.customer, offer, channel, reason, persona });
-          const res = await llm.chat(msgs, { maxTokens: 200, temperature: 0.7 });
+          const res = await llm.chat(msgs, {
+            maxTokens: 200,
+            temperature: 0.7,
+            sessionKey: 'service:preventivi:one-to-one',
+            sessionLabel: 'Preventivi one-to-one',
+          });
           if (res.content.trim()) body = res.content.trim();
         } catch {
           // graceful degradation: usa template
@@ -164,7 +169,12 @@ export async function buildOneToManyDraftsForOffer(params: {
         try {
           const persona = personas.content as CopilotRMPersona;
           const msgs = buildOneToManyMessagePrompt({ offer, segment, channel, persona });
-          const res = await llm.chat(msgs, { maxTokens: 300, temperature: 0.8 });
+          const res = await llm.chat(msgs, {
+            maxTokens: 300,
+            temperature: 0.8,
+            sessionKey: 'service:content:one-to-many',
+            sessionLabel: 'Content one-to-many',
+          });
           if (res.content.trim()) body = res.content.trim();
         } catch {
           // graceful degradation: usa template
@@ -277,7 +287,12 @@ export async function consultProposal(params: {
         persona,
         extraPrompt: prompt,
       });
-      const res = await llm.chat(msgs, { maxTokens: 800, temperature: 0.7 });
+      const res = await llm.chat(msgs, {
+        maxTokens: 800,
+        temperature: 0.7,
+        sessionKey: 'service:preventivi:consult',
+        sessionLabel: 'Preventivi consult',
+      });
       const parsed = extractJSON<ConsultProposalLLMOutput>(res.content);
       if (parsed?.variants?.length && parsed?.scripts) {
         variants = parsed.variants as ConsultVariant[];

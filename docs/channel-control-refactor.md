@@ -93,6 +93,7 @@ Implemented in this refactor:
 - Telegram callbacks and richer control panels
 - WhatsApp interactive buttons and reply parsing
 - WhatsApp group-aware routing
+- TeGem/Gemini tab session routing for shared channel assistants and per-agent frontend orchestration
 - Postgres persistence for channel peers/events
 - Google Workspace sync + agenda/shift/meeting operations
 - admin endpoint + manager rendering for channel-control and workspace

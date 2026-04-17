@@ -102,7 +102,13 @@ async function runContentPipeline(item: RssIngestedEvent['payload']): Promise<{ 
   // ── 1. Roundtable discussione (se LLM disponibile) ────────────────────────
   if (discussion) {
     try {
-      const result = await discussion.discuss({ topic, context, agents: CONTENT_AGENTS, rounds: 1 });
+      const result = await discussion.discuss({
+        topic,
+        context,
+        agents: CONTENT_AGENTS,
+        rounds: 1,
+        sessionNamespace: 'worker-content',
+      });
       if (result.synthesis) {
         synthesis = result.synthesis;
         logger.info('worker-content: discussione completata', {
@@ -153,7 +159,12 @@ async function runContentPipeline(item: RssIngestedEvent['payload']): Promise<{ 
             ].join('\n'),
           },
         ],
-        { tier: 'medium', maxTokens: 800 }
+        {
+          tier: 'medium',
+          maxTokens: 800,
+          sessionKey: 'worker-content:writer',
+          sessionLabel: 'Worker content writer',
+        }
       );
       postContent = resp.content;
       // Extract excerpt from first paragraph
@@ -240,7 +251,13 @@ async function runInvoiceContentPipeline(payload: {
       try {
         const topic = `Scheda commerciale per: ${enrichedTitle}`;
         const context = `Prodotto: ${enrichedTitle}. ${brand ? `Marca: ${brand}.` : ''} Descrizione: ${enrichedDesc}. Prezzo: ${priceStr}. Qty: ${line.qty}.`;
-        const result = await discussion.discuss({ topic, context, agents: CONTENT_AGENTS, rounds: 1 });
+        const result = await discussion.discuss({
+          topic,
+          context,
+          agents: CONTENT_AGENTS,
+          rounds: 1,
+          sessionNamespace: 'worker-content',
+        });
         if (result.synthesis && discussion) {
           const llmCfg = loadConfig();
           const llm = createLLMClient(llmCfg.llm);
@@ -264,7 +281,12 @@ async function runInvoiceContentPipeline(payload: {
                 ].filter(Boolean).join('\n'),
               },
             ],
-            { tier: 'small', maxTokens: 600 }
+            {
+              tier: 'small',
+              maxTokens: 600,
+              sessionKey: 'worker-content:product-sheet',
+              sessionLabel: 'Worker content product sheet',
+            }
           );
           if (resp.content.trim()) blogDraft = resp.content.trim();
         }

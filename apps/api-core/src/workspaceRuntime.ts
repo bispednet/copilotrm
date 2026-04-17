@@ -124,7 +124,13 @@ async function chatWithContext(llm: LLMClient, system: string, user: string): Pr
     { role: 'system', content: system },
     { role: 'user', content: user },
   ];
-  const response = await llm.chat(messages, { tier: 'small', temperature: 0.2, maxTokens: 420 });
+  const response = await llm.chat(messages, {
+    tier: 'small',
+    temperature: 0.2,
+    maxTokens: 420,
+    sessionKey: 'workspace-runtime',
+    sessionLabel: 'Workspace runtime',
+  });
   return response.content.trim();
 }
 

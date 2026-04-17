@@ -64,7 +64,11 @@ function nowIso(): string {
   return new Date().toISOString();
 }
 
-async function readChatSynthesis(message: string, sessionId?: string): Promise<{ synthesis: string; sessionId: string | null }> {
+async function readChatSynthesis(
+  message: string,
+  sessionId?: string,
+  source: 'whatsapp' | 'telegram' = 'telegram',
+): Promise<{ synthesis: string; sessionId: string | null }> {
   const apiBase =
     process.env.COPILOTRM_API_URL ??
     process.env.API_CORE_URL ??
@@ -76,7 +80,7 @@ async function readChatSynthesis(message: string, sessionId?: string): Promise<{
       'content-type': 'application/json',
       'x-bisp-role': 'admin',
     },
-    body: JSON.stringify({ message, sessionId }),
+    body: JSON.stringify({ message, sessionId, source }),
   });
 
   if (!res.ok || !res.body) {
@@ -870,7 +874,8 @@ export async function handleChannelControlRequest(repo: ChannelControlRepository
       repo.updatePeer(peer.channel, peer.peerId, { awaitingInputFor: undefined });
     }
     try {
-      const { synthesis, sessionId } = await readChatSynthesis(text, peer.lastSessionId);
+      const source = peer.channel === 'whatsapp' ? 'whatsapp' : 'telegram';
+      const { synthesis, sessionId } = await readChatSynthesis(text, peer.lastSessionId, source);
       repo.updatePeer(peer.channel, peer.peerId, { lastSessionId: sessionId ?? undefined });
       return {
         handled: true,

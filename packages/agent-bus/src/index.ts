@@ -62,8 +62,17 @@ export interface DiscussionResult {
 interface LLMClientLike {
   chat(
     messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }>,
-    opts?: { tier?: 'small' | 'medium' | 'large'; maxTokens?: number }
+    opts?: {
+      tier?: 'small' | 'medium' | 'large';
+      maxTokens?: number;
+      sessionKey?: string;
+      sessionLabel?: string;
+    }
   ): Promise<{ content: string }>;
+}
+
+function toSessionSlug(value: string): string {
+  return value.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'shared';
 }
 
 /**
@@ -80,8 +89,9 @@ export class AgentDiscussion {
     agents: DiscussionAgent[];
     rounds?: number;
     maxWordsPerTurn?: number;
+    sessionNamespace?: string;
   }): Promise<DiscussionResult> {
-    const { topic, context = '', agents, rounds = 2, maxWordsPerTurn = 80 } = params;
+    const { topic, context = '', agents, rounds = 2, maxWordsPerTurn = 80, sessionNamespace = 'agent-discussion' } = params;
     const start = Date.now();
     const messages: DiscussionMessage[] = [];
 
@@ -111,7 +121,12 @@ export class AgentDiscussion {
               { role: 'system', content: systemPrompt },
               { role: 'user', content: userPrompt },
             ],
-            { tier: 'small', maxTokens: 200 }
+            {
+              tier: 'small',
+              maxTokens: 200,
+              sessionKey: `${sessionNamespace}:${toSessionSlug(agent.name)}`,
+              sessionLabel: `${sessionNamespace} · ${agent.name}`,
+            }
           );
           messages.push({ agent: agent.name, content: resp.content.trim(), round: r + 1 });
         } catch {
@@ -137,7 +152,12 @@ export class AgentDiscussion {
               content: `Argomento: ${topic}\n\nDiscussione:\n${transcript}\n\nSintetizza i punti chiave.`,
             },
           ],
-          { tier: 'small', maxTokens: 250 }
+          {
+            tier: 'small',
+            maxTokens: 250,
+            sessionKey: `${sessionNamespace}:moderator`,
+            sessionLabel: `${sessionNamespace} · Moderatore`,
+          }
         );
         synthesis = synthResp.content.trim();
       } catch {

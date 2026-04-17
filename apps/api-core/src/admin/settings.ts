@@ -30,13 +30,17 @@ const SETTING_CATALOG: Array<{
   description: string;
   parse?: (raw: string) => AdminSettingItem['value'];
 }> = [
-  { key: 'models.provider.primary', envKeys: ['OLLAMA_MODEL', 'LARGE_OLLAMA_MODEL'], category: 'models', type: 'string', description: 'Modello primario locale (fallback su large ollama).' },
+  { key: 'models.provider.primary', envKeys: ['LLM_PROVIDER'], category: 'models', type: 'string', description: 'Provider LLM primario: ollama, openai, anthropic, deepseek, tegem.' },
+  { key: 'models.provider.fallback', envKeys: ['LLM_FALLBACK_PROVIDER'], category: 'models', type: 'string', description: 'Provider LLM di fallback retryable.' },
   { key: 'models.provider.small', envKeys: ['SMALL_OLLAMA_MODEL', 'SMALL_OPENAI_MODEL'], category: 'models', type: 'string', description: 'Modello small per task economici.' },
   { key: 'models.provider.medium', envKeys: ['MEDIUM_OLLAMA_MODEL', 'MEDIUM_OPENAI_MODEL'], category: 'models', type: 'string', description: 'Modello medium per routing e drafting.' },
   { key: 'models.provider.large', envKeys: ['LARGE_OLLAMA_MODEL', 'LARGE_OPENAI_MODEL'], category: 'models', type: 'string', description: 'Modello large per contenuti/decisioni complesse.' },
   { key: 'models.embedding.provider', envKeys: ['OLLAMA_EMBEDDING_MODEL', 'EMBEDDING_OPENAI_MODEL'], category: 'models', type: 'string', description: 'Embedding model per RAG.' },
   { key: 'models.ollama.url', envKeys: ['OLLAMA_SERVER_URL'], category: 'models', type: 'string', description: 'Endpoint Ollama locale.' },
   { key: 'models.openai.enabled', envKeys: ['OPENAI_API_KEY'], category: 'models', type: 'boolean', description: 'Fallback API OpenAI abilitato (chiave presente).', parse: (raw) => Boolean(raw.trim()) },
+  { key: 'models.tegem.profileDir', envKeys: ['PLAYWRIGHT_BASE_PROFILE_DIR'], category: 'models', type: 'string', description: 'Directory profili Playwright/Gemini.' },
+  { key: 'models.tegem.namespace', envKeys: ['PLAYWRIGHT_PROFILE_NAMESPACE'], category: 'models', type: 'string', description: 'Namespace profilo Playwright/Gemini.' },
+  { key: 'models.tegem.chrome', envKeys: ['PLAYWRIGHT_EXECUTABLE_PATH', 'PLAYWRIGHT_BROWSER_CHANNEL'], category: 'models', type: 'string', description: 'Browser usato dal provider TeGem.' },
   { key: 'channels.telegram.botToken', envKeys: ['TELEGRAM_BOT_TOKEN'], category: 'channels', type: 'secret', description: 'Bot token Telegram.' },
   { key: 'channels.telegram.approvedChannels', envKeys: ['TELEGRAM_ID_APPROVE_BOT'], category: 'channels', type: 'string[]', description: 'Canali/gruppi Telegram autorizzati.', parse: (raw) => raw.split(',').map((s) => s.trim()).filter(Boolean) },
   { key: 'channels.telegram.offerChannel', envKeys: ['TELEGRAM_CHANNEL_ID_APPROVE_POST'], category: 'channels', type: 'string', description: 'Canale Telegram offerte.' },

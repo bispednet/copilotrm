@@ -396,7 +396,7 @@ async function maybeAdvisorNote(state: ApiState, context: string, errorMessage: 
         { role: 'system', content: 'Sei un operatore NOC CRM. Fornisci una sola frase operativa in italiano, concreta, max 22 parole.' },
         { role: 'user', content: `Contesto: ${context}. Errore: ${errorMessage}. Suggerisci la correzione immediata.` },
       ],
-      { tier: 'small', temperature: 0.1, maxTokens: 80 }
+      { tier: 'small', temperature: 0.1, maxTokens: 80, sessionKey: 'ops:advisor', sessionLabel: 'Ops advisor' }
     );
     const msg = out.content.trim();
     return msg.length > 0 ? msg : `Riprova con timeout più alto e batch ridotto. (${context})`;
@@ -964,7 +964,13 @@ const CHAT_AGENTS_LIST = ['Assistenza', 'Commerciale', 'Hardware', 'Telefonia', 
 interface LLMClientLike {
   chat(
     messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }>,
-    opts?: { tier?: 'small' | 'medium' | 'large'; maxTokens?: number; temperature?: number }
+    opts?: {
+      tier?: 'small' | 'medium' | 'large';
+      maxTokens?: number;
+      temperature?: number;
+      sessionKey?: string;
+      sessionLabel?: string;
+    }
   ): Promise<{ content: string; provider: string; model?: string }>;
 }
 
@@ -1084,14 +1090,36 @@ async function runChatOrchestration(params: {
   activeObjectives: ManagerObjective[];
   characterStudio: CharacterStudioRepository;
   conversationHistory?: Array<{ role: 'user' | 'assistant'; content: string }>;
+  llmSessionNamespace?: string;
   /** Chiamato immediatamente PRIMA che l'agente venga interrogato */
   onTyping?: (agent: string, agentRole: string) => void;
   /** Chiamato immediatamente DOPO che l'agente risponde */
   onMessage?: (msg: ChatSwarmMsg) => void;
 }): Promise<{ thread: ChatSwarmMsg[]; synthesis: string }> {
-  const { llm, message, customer, customerTickets, activeOffers, activeObjectives, characterStudio, conversationHistory, onTyping, onMessage } = params;
+  const {
+    llm,
+    message,
+    customer,
+    customerTickets,
+    activeOffers,
+    activeObjectives,
+    characterStudio,
+    conversationHistory,
+    llmSessionNamespace = 'frontend',
+    onTyping,
+    onMessage,
+  } = params;
   const thread: ChatSwarmMsg[] = [];
   const agentResponses: Record<string, string> = {};
+
+  const llmOptsFor = (
+    agentName: string,
+    opts: { tier?: 'small' | 'medium' | 'large'; maxTokens?: number; temperature?: number } = {},
+  ) => ({
+    ...opts,
+    sessionKey: `${llmSessionNamespace}:${agentName.toLowerCase().replace(/[^a-z0-9]+/g, '-') || 'shared'}`,
+    sessionLabel: `${llmSessionNamespace} · ${agentName}`,
+  });
 
   const sharedDataCtx = buildAgentDataContext('Orchestratore', customer, customerTickets, activeOffers, activeObjectives);
   const agentList = CHAT_AGENTS_LIST.map((n) => {
@@ -1119,7 +1147,7 @@ async function runChatOrchestration(params: {
     const resp = await llm.chat([
       { role: 'system', content: `${orchPrompt}\n\nAgenti disponibili: ${agentList}.` },
       { role: 'user', content: `Richiesta operatore: "${message}"${historyCtx}\n\n${sharedDataCtx}` },
-    ], { tier: 'small', maxTokens: 180 });
+    ], llmOptsFor('Orchestratore', { tier: 'small', maxTokens: 180 }));
     orchestratorBrief = resp.content.trim();
     involvedAgents = extractMentions(orchestratorBrief);
     if (involvedAgents.length === 0) {
@@ -1150,7 +1178,7 @@ async function runChatOrchestration(params: {
           content: `${sysPrompt}\n\nRispondi al brief dell'Orchestratore basandoti sui dati reali (max 80 parole). Sii diretto. Puoi taggare un altro agente con @NomeAgente se necessario.`,
         },
         { role: 'user', content: `Brief: ${orchestratorBrief}${threadSummary()}\n\n${domainData}` },
-      ], { tier: 'small', maxTokens: 160 });
+      ], llmOptsFor(agentName, { tier: 'small', maxTokens: 160 }));
       content = resp.content.trim();
     } catch { /* usa fallback */ }
 
@@ -1173,7 +1201,7 @@ async function runChatOrchestration(params: {
       const resp = await llm.chat([
         { role: 'system', content: `${sysPrompt}\n\nSei stato chiamato dai colleghi. Rispondi al punto che ti riguarda (max 70 parole), cita i dati reali.` },
         { role: 'user', content: `${threadSummary()}\n\n${domainData}` },
-      ], { tier: 'small', maxTokens: 140 });
+      ], llmOptsFor(agentName, { tier: 'small', maxTokens: 140 }));
       content = resp.content.trim();
     } catch { /* usa fallback */ }
 
@@ -1193,7 +1221,7 @@ async function runChatOrchestration(params: {
     const resp = await llm.chat([
       { role: 'system', content: criticPrompt },
       { role: 'user', content: `Richiesta: "${message}"\n\n${sharedDataCtx}${threadSummary()}` },
-    ], { tier: 'small', maxTokens: 140 });
+    ], llmOptsFor('Critico', { tier: 'small', maxTokens: 140 }));
     criticContent = resp.content.trim();
     criticMentions = extractMentions(criticContent);
   } catch {
@@ -1215,7 +1243,7 @@ async function runChatOrchestration(params: {
       const resp = await llm.chat([
         { role: 'system', content: `${sysPrompt}\n\nIl Critico ha sfidato la tua proposta. Rispondi con i dati reali (max 60 parole). Sii concreto.` },
         { role: 'user', content: `Tua proposta: ${agentResponses[agentName] ?? ''}${threadSummary()}\n\n${domainData}` },
-      ], { tier: 'small', maxTokens: 120 });
+      ], llmOptsFor(agentName, { tier: 'small', maxTokens: 120 }));
       content = resp.content.trim();
     } catch { /* usa fallback */ }
 
@@ -1233,7 +1261,7 @@ async function runChatOrchestration(params: {
     const resp = await llm.chat([
       { role: 'system', content: modPrompt },
       { role: 'user', content: `Richiesta: "${message}"\n\n${sharedDataCtx}${threadSummary()}` },
-    ], { tier: 'small', maxTokens: 220 });
+    ], llmOptsFor('Moderatore', { tier: 'small', maxTokens: 220 }));
     synthesis = resp.content.trim();
   } catch { /* usa fallback */ }
 
@@ -2207,9 +2235,15 @@ export function buildServer(state = buildState()) {
   const ENV_STATUS_CATALOG = [
     // LLM
     { key: 'OLLAMA_SERVER_URL', category: 'llm', label: 'Ollama URL' },
+    { key: 'LLM_PROVIDER', category: 'llm', label: 'Primary LLM provider' },
+    { key: 'LLM_FALLBACK_PROVIDER', category: 'llm', label: 'Fallback LLM provider' },
     { key: 'OPENAI_API_KEY', category: 'llm', label: 'OpenAI API Key' },
     { key: 'ANTHROPIC_API_KEY', category: 'llm', label: 'Anthropic API Key' },
     { key: 'DEEPSEEK_API_KEY', category: 'llm', label: 'DeepSeek API Key' },
+    { key: 'PLAYWRIGHT_BASE_PROFILE_DIR', category: 'llm', label: 'TeGem profile dir' },
+    { key: 'PLAYWRIGHT_PROFILE_NAMESPACE', category: 'llm', label: 'TeGem profile namespace' },
+    { key: 'PLAYWRIGHT_EXECUTABLE_PATH', category: 'llm', label: 'TeGem browser executable' },
+    { key: 'PLAYWRIGHT_BROWSER_CHANNEL', category: 'llm', label: 'TeGem browser channel' },
     // Telegram
     { key: 'TELEGRAM_BOT_TOKEN', category: 'telegram', label: 'Telegram Bot Token' },
     { key: 'TELEGRAM_ALLOWED_CHAT_IDS', category: 'telegram', label: 'Chat IDs autorizzati' },
@@ -2321,6 +2355,7 @@ export function buildServer(state = buildState()) {
     return ({
     local: [
       { provider: 'ollama', models: ['gemma3:27b', 'deepseek-r1:32b', 'mxbai-embed-large'], kind: ['chat', 'reasoning', 'embedding'] },
+      { provider: 'tegem', models: ['gemini-web'], kind: ['chat'] },
       { provider: 'lmstudio', models: ['custom-local'], kind: ['chat'] },
     ],
     cloud: [
@@ -3446,10 +3481,10 @@ export function buildServer(state = buildState()) {
 
   // ─── /api/chat — SSE streaming: ogni agente appare non appena risponde ──────
   app.post<{
-    Body: { message: string; customerId?: string; sessionId?: string };
+    Body: { message: string; customerId?: string; sessionId?: string; source?: 'frontend' | 'whatsapp' | 'telegram' };
   }>('/api/chat', async (req, reply) => {
     if (ensurePermission(req, reply, 'consult:read') === null) return;
-    const { message, customerId, sessionId: incomingSessionId } = req.body;
+    const { message, customerId, sessionId: incomingSessionId, source } = req.body;
     if (!message?.trim()) return reply.code(400).send({ error: 'message è obbligatorio' });
 
     // Switch to raw SSE mode — Fastify non invierà nessuna risposta automatica
@@ -3521,6 +3556,12 @@ export function buildServer(state = buildState()) {
         activeObjectives,
         characterStudio: state.characterStudio,
         conversationHistory: history,
+        llmSessionNamespace:
+          source === 'whatsapp'
+            ? 'channel-whatsapp'
+            : source === 'telegram'
+              ? 'channel-telegram'
+              : 'frontend',
         onTyping: (agent, agentRole) => send({ type: 'typing', agent, agentRole }),
         onMessage: (msg) => send({ type: 'message', msg }),
       });
@@ -3651,7 +3692,7 @@ Restituisci JSON con questi campi:
     try {
       const res = await state.llm.chat(
         [{ role: 'system', content: systemPrompt }, { role: 'user', content: userPrompt }],
-        { maxTokens: 600, temperature: 0.2 }
+        { maxTokens: 600, temperature: 0.2, sessionKey: 'assist:intake-parser', sessionLabel: 'Assist intake parser' }
       );
       let parsed: Record<string, unknown>;
       try {
