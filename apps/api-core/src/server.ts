@@ -57,6 +57,14 @@ import { EventRuntime, type EventCycleType } from './eventsRuntime';
 import { ChannelControlRepository, handleChannelControlRequest } from './channelControl';
 import { WorkspaceRuntime } from './workspaceRuntime';
 import {
+  createControlCenterUser,
+  createSessionForUser,
+  resolveSessionPrincipal,
+  verifyPassword,
+  hashPassword,
+  type SessionPrincipal,
+} from './controlCenterAuth';
+import {
   buildCampaignTasks,
   buildOneToManyDraftsForOffer,
   buildOneToOneDraftsForOffer,
@@ -67,6 +75,7 @@ import {
   validateDraftRecipient,
 } from './services';
 import type { SupportedControlChannel } from '@bisp/channel-control';
+import type { ControlCenterUserRecord } from './postgresMirror';
 
 export interface ApiState {
   contentCards: ContentCardRepository;
@@ -1489,7 +1498,8 @@ export function buildServer(state = buildState()) {
   const app = Fastify({ logger: { level: 'info' } });
   const authMode = (process.env.BISPCRM_AUTH_MODE ?? 'header') as 'none' | 'header';
   const authEnabled = authMode === 'header';
-  const resolveRole = (headers: Record<string, unknown>): RbacRole => {
+  type RequestWithPrincipal = { headers: Record<string, unknown>; authPrincipal?: SessionPrincipal | null };
+  const resolveRoleFromHeaders = (headers: Record<string, unknown>): RbacRole => {
     const raw = String(headers['x-bisp-role'] ?? 'viewer');
     const role = raw as RbacRole;
     return role in ROLE_PERMISSIONS ? role : 'viewer';
@@ -1498,19 +1508,26 @@ export function buildServer(state = buildState()) {
     const role = String(raw ?? 'viewer') as RbacRole;
     return role in ROLE_PERMISSIONS ? role : 'viewer';
   };
+  const resolveRequestRole = (req: RequestWithPrincipal): RbacRole => req.authPrincipal?.role ?? resolveRoleFromHeaders(req.headers);
+  const resolveRequestUser = (req: RequestWithPrincipal): SessionPrincipal['user'] | null => req.authPrincipal?.user ?? null;
   const ensurePermission = (
-    req: { headers: Record<string, unknown> },
+    req: RequestWithPrincipal,
     reply: { code: (code: number) => { send: (payload: unknown) => unknown } },
     permission: string
   ): RbacRole | null => {
-    if (authEnabled && !req.headers['x-bisp-role']) {
-      reply.code(401).send({ error: 'Missing x-bisp-role header', authMode });
+    if (req.authPrincipal) {
+      if (can(req.authPrincipal.role, permission)) return req.authPrincipal.role;
+      reply.code(403).send({ error: 'Forbidden', role: req.authPrincipal.role, permission, authMode, via: 'session' });
       return null;
     }
-    const role = resolveRole(req.headers);
+    if (authEnabled && !req.headers['x-bisp-role']) {
+      reply.code(401).send({ error: 'Missing session or x-bisp-role header', authMode });
+      return null;
+    }
+    const role = resolveRoleFromHeaders(req.headers);
     if (!authEnabled) return role;
     if (can(role, permission)) return role;
-    reply.code(403).send({ error: 'Forbidden', role, permission, authMode });
+    reply.code(403).send({ error: 'Forbidden', role, permission, authMode, via: 'header' });
     return null;
   };
 
@@ -1660,10 +1677,14 @@ export function buildServer(state = buildState()) {
   void (app as any).register(cors, {
     origin: true,
     methods: ['GET', 'POST', 'PATCH', 'PUT', 'DELETE', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization', 'x-bisp-role', 'Accept'],
-    exposedHeaders: ['x-bisp-role'],
+    allowedHeaders: ['Content-Type', 'Authorization', 'x-bisp-role', 'x-bisp-session', 'Accept'],
+    exposedHeaders: ['x-bisp-role', 'x-bisp-session'],
     preflightContinue: false,
     optionsSuccessStatus: 204,
+  });
+  app.addHook('onRequest', async (req) => {
+    (req as typeof req & { authPrincipal?: SessionPrincipal | null }).authPrincipal =
+      await resolveSessionPrincipal(state.postgresMirror, req.headers as Record<string, unknown>);
   });
   app.addHook('onReady', async () => {
     const shouldAutoLoad = envFlag(
@@ -1732,7 +1753,194 @@ export function buildServer(state = buildState()) {
     await state.postgresMirror.close().catch(() => undefined);
   });
 
+  const redactControlCenterUser = (
+    user: ControlCenterUserRecord,
+  ): Omit<ControlCenterUserRecord, 'passwordHash'> => ({
+    id: user.id,
+    email: user.email,
+    fullName: user.fullName,
+    role: user.role,
+    status: user.status,
+    preferences: user.preferences,
+    lastLoginAt: user.lastLoginAt,
+    createdAt: user.createdAt,
+    updatedAt: user.updatedAt,
+  });
+
+  async function buildTeamOverview() {
+    const [workspace, channelSummary] = await Promise.all([
+      state.workspace.buildAdminSnapshot(),
+      state.channelControl.buildSummary(state),
+    ]);
+    const telemetry = state.channelControl.telemetry();
+    const peers = state.channelControl.listPeers().slice(0, 20);
+    const teamUsers = await state.postgresMirror.loadControlCenterUsers();
+    const usersByRole = teamUsers.reduce<Record<string, number>>((acc, user) => {
+      acc[user.role] = (acc[user.role] ?? 0) + 1;
+      return acc;
+    }, {});
+    return {
+      summary: {
+        users: teamUsers.length,
+        usersByRole,
+        workspaceConfigured: workspace.summary.configured,
+        telegramConfigured: state.channels.telegram.configured,
+        whatsappConfigured: state.channels.whatsapp.configured,
+        googleConfigured: state.workspace.configured,
+        queueMode: channelSummary.queueMode,
+      },
+      workspace,
+      channels: {
+        summary: channelSummary,
+        telemetry,
+        peers,
+        telegramGroupIds: csvEnvList('TELEGRAM_ID_APPROVE_BOT'),
+        whatsappGroupIds: csvEnvList('WHATSAPP_ALLOWED_GROUP_IDS'),
+      },
+    };
+  }
+
   app.get('/health', async () => ({ ok: true, service: 'api-core', ts: new Date().toISOString() }));
+
+  app.get('/api/auth/bootstrap-status', async (_req, reply) => {
+    if (!state.postgresMirror.enabled) return reply.code(503).send({ error: 'Control center auth requires postgres persistence' });
+    const users = await state.postgresMirror.countControlCenterUsers();
+    return { ok: true, hasUsers: users > 0, users };
+  });
+
+  app.post<{ Body: { email?: string; fullName?: string; password?: string } }>('/api/auth/bootstrap', async (req, reply) => {
+    if (!state.postgresMirror.enabled) return reply.code(503).send({ error: 'Control center auth requires postgres persistence' });
+    const existing = await state.postgresMirror.countControlCenterUsers();
+    if (existing > 0) return reply.code(409).send({ error: 'Bootstrap already completed' });
+    const email = String(req.body?.email ?? '').trim().toLowerCase();
+    const fullName = String(req.body?.fullName ?? '').trim();
+    const password = String(req.body?.password ?? '');
+    if (!email || !fullName || password.length < 10) {
+      return reply.code(400).send({ error: 'Email, full name and a password of at least 10 characters are required' });
+    }
+    const user = createControlCenterUser({ email, fullName, role: 'admin', password });
+    await state.postgresMirror.saveControlCenterUser(user);
+    const principal = await createSessionForUser(state.postgresMirror, user, req.headers as Record<string, unknown>);
+    return reply.send({ ok: true, bootstrap: true, session: principal, user: redactControlCenterUser(user) });
+  });
+
+  app.post<{ Body: { email?: string; password?: string } }>('/api/auth/login', async (req, reply) => {
+    if (!state.postgresMirror.enabled) return reply.code(503).send({ error: 'Control center auth requires postgres persistence' });
+    const email = String(req.body?.email ?? '').trim().toLowerCase();
+    const password = String(req.body?.password ?? '');
+    if (!email || !password) return reply.code(400).send({ error: 'Email and password are required' });
+    const user = await state.postgresMirror.getControlCenterUserByEmail(email);
+    if (!user || user.status !== 'active' || !verifyPassword(password, user.passwordHash)) {
+      return reply.code(401).send({ error: 'Invalid credentials' });
+    }
+    const updatedUser = { ...user, lastLoginAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
+    await state.postgresMirror.saveControlCenterUser(updatedUser);
+    const principal = await createSessionForUser(state.postgresMirror, updatedUser, req.headers as Record<string, unknown>);
+    return { ok: true, session: principal, user: redactControlCenterUser(updatedUser) };
+  });
+
+  app.get('/api/auth/me', async (req, reply) => {
+    const principal = (req as typeof req & { authPrincipal?: SessionPrincipal | null }).authPrincipal;
+    if (!principal) return reply.code(401).send({ error: 'Unauthorized' });
+    return { ok: true, session: principal };
+  });
+
+  app.post('/api/auth/logout', async (req, reply) => {
+    const principal = (req as typeof req & { authPrincipal?: SessionPrincipal | null }).authPrincipal;
+    if (principal) {
+      await state.postgresMirror.deleteControlCenterSession(principal.token);
+    }
+    return { ok: true };
+  });
+
+  app.get('/api/admin/users', async (req, reply) => {
+    if (ensurePermission(req, reply, 'settings:write') === null) return;
+    const users = await state.postgresMirror.loadControlCenterUsers();
+    return users.map(redactControlCenterUser);
+  });
+
+  app.post<{ Body: { email?: string; fullName?: string; role?: ControlCenterUserRecord['role']; password?: string; status?: ControlCenterUserRecord['status'] } }>(
+    '/api/admin/users',
+    async (req, reply) => {
+      if (ensurePermission(req, reply, 'settings:write') === null) return;
+      const email = String(req.body?.email ?? '').trim().toLowerCase();
+      const fullName = String(req.body?.fullName ?? '').trim();
+      const role = resolveRoleCandidate(req.body?.role ?? 'viewer') as ControlCenterUserRecord['role'];
+      const password = String(req.body?.password ?? '');
+      const status = req.body?.status === 'disabled' ? 'disabled' : 'active';
+      if (!email || !fullName || password.length < 10) {
+        return reply.code(400).send({ error: 'Email, full name and a password of at least 10 characters are required' });
+      }
+      const existing = await state.postgresMirror.getControlCenterUserByEmail(email);
+      if (existing) return reply.code(409).send({ error: 'User already exists' });
+      const user = createControlCenterUser({ email, fullName, role, password, status });
+      await state.postgresMirror.saveControlCenterUser(user);
+      return reply.code(201).send({ ok: true, user: redactControlCenterUser(user) });
+    }
+  );
+
+  app.patch<{ Params: { id: string }; Body: { fullName?: string; role?: ControlCenterUserRecord['role']; status?: ControlCenterUserRecord['status']; password?: string } }>(
+    '/api/admin/users/:id',
+    async (req, reply) => {
+      if (ensurePermission(req, reply, 'settings:write') === null) return;
+      const current = await state.postgresMirror.getControlCenterUserById(req.params.id);
+      if (!current) return reply.code(404).send({ error: 'User not found' });
+      const next: ControlCenterUserRecord = {
+        ...current,
+        fullName: String(req.body?.fullName ?? current.fullName).trim() || current.fullName,
+        role: req.body?.role ? (resolveRoleCandidate(req.body.role) as ControlCenterUserRecord['role']) : current.role,
+        status: req.body?.status === 'disabled' ? 'disabled' : req.body?.status === 'active' ? 'active' : current.status,
+        passwordHash: req.body?.password ? hashPassword(String(req.body.password)) : current.passwordHash,
+        updatedAt: new Date().toISOString(),
+      };
+      await state.postgresMirror.saveControlCenterUser(next);
+      return { ok: true, user: redactControlCenterUser(next) };
+    }
+  );
+
+  app.get('/api/team/overview', async (req, reply) => {
+    if (ensurePermission(req, reply, 'manager:write') === null) return;
+    return buildTeamOverview();
+  });
+
+  app.post<{ Body: { text?: string } }>('/api/team/workspace-query', async (req, reply) => {
+    if (ensurePermission(req, reply, 'manager:write') === null) return;
+    const text = String(req.body?.text ?? '').trim();
+    if (!text) return reply.code(400).send({ error: 'Text is required' });
+    const result = await state.workspace.answerWorkspaceQuery(text);
+    return { ok: true, result };
+  });
+
+  app.post<{ Body: { text?: string } }>('/api/team/meetings', async (req, reply) => {
+    if (ensurePermission(req, reply, 'manager:write') === null) return;
+    const text = String(req.body?.text ?? '').trim();
+    if (!text) return reply.code(400).send({ error: 'Meeting request text is required' });
+    const result = await state.workspace.createMeetingFromText(text);
+    return { ok: true, result };
+  });
+
+  app.post<{ Body: { channel?: 'telegram' | 'whatsapp' | 'all'; text?: string } }>('/api/team/broadcast', async (req, reply) => {
+    if (ensurePermission(req, reply, 'manager:write') === null) return;
+    const channel = req.body?.channel ?? 'all';
+    const text = String(req.body?.text ?? '').trim();
+    if (!text) return reply.code(400).send({ error: 'Broadcast text is required' });
+    const telegramResults =
+      channel === 'telegram' || channel === 'all'
+        ? await state.channels.telegram.broadcastToGroups(text, { parseMode: 'HTML' })
+        : [];
+    const whatsappGroups = csvEnvList('WHATSAPP_ALLOWED_GROUP_IDS');
+    const whatsappResults =
+      channel === 'whatsapp' || channel === 'all'
+        ? await Promise.all(whatsappGroups.map((groupId) => state.channels.whatsapp.sendText(groupId, text, false, 'group')))
+        : [];
+    return {
+      ok: true,
+      actor: resolveRequestUser(req)?.email ?? resolveRequestRole(req),
+      channel,
+      telegramResults,
+      whatsappResults,
+    };
+  });
 
   app.get('/api/customers', async () => state.customers.list());
 
@@ -1909,7 +2117,7 @@ export function buildServer(state = buildState()) {
     }
 
     try {
-      const dispatch = await dispatchDraft(state, item.draft, String(req.headers['x-bisp-role'] ?? 'manager'));
+      const dispatch = await dispatchDraft(state, item.draft, String(resolveRequestRole(req)));
       const status = dispatch.status;
       const externalId = dispatch.externalId;
       const updated = state.drafts.update(item.id, { status, externalId, sentAt: new Date().toISOString() });
@@ -1971,7 +2179,7 @@ export function buildServer(state = buildState()) {
       state.audit.write(makeAuditRecord('manager', 'outbox.approved', { outboxId: item.id, actor: req.body.actor ?? 'manager' }));
     }
     try {
-      const dispatch = await dispatchDraft(state, item.draft, String(req.headers['x-bisp-role'] ?? req.body.actor ?? 'manager'));
+      const dispatch = await dispatchDraft(state, item.draft, String(resolveRequestRole(req) ?? req.body.actor ?? 'manager'));
       const dispatchStatus = dispatch.status;
       const externalId = dispatch.externalId;
 
@@ -2451,7 +2659,7 @@ export function buildServer(state = buildState()) {
       channel: req.body.channel,
       status: 'processing',
       requestPayload: req.body as unknown as Record<string, unknown>,
-      createdBy: String(req.headers['x-bisp-role'] ?? 'system'),
+      createdBy: String(resolveRequestUser(req)?.email ?? resolveRequestRole(req) ?? 'system'),
       createdAt: new Date().toISOString(),
     };
     void state.postgresMirror.saveMediaJob(mediaJob);
@@ -2992,15 +3200,20 @@ export function buildServer(state = buildState()) {
     return eventRuntime.listRuns({ type, limit });
   });
 
-  app.get<{ Querystring: { type?: EventCycleType; bispRole?: string } }>('/api/events/stream', async (req, reply) => {
+  app.get<{ Querystring: { type?: EventCycleType; bispRole?: string; bispSession?: string } }>('/api/events/stream', async (req, reply) => {
+    const principal =
+      (req as typeof req & { authPrincipal?: SessionPrincipal | null }).authPrincipal ??
+      (req.query.bispSession
+        ? await resolveSessionPrincipal(state.postgresMirror, { ...req.headers, 'x-bisp-session': req.query.bispSession })
+        : null);
     const headerRole = req.headers['x-bisp-role'];
     const queryRole = req.query.bispRole;
-    const role = resolveRoleCandidate(headerRole ?? queryRole);
-    if (authEnabled && !headerRole && !queryRole) {
-      return reply.code(401).send({ error: 'Missing x-bisp-role header or bispRole query', authMode });
+    const role = principal?.role ?? resolveRoleCandidate(headerRole ?? queryRole);
+    if (authEnabled && !principal && !headerRole && !queryRole) {
+      return reply.code(401).send({ error: 'Missing session or x-bisp-role header', authMode });
     }
     if (authEnabled && !can(role, 'kpi:read')) {
-      return reply.code(403).send({ error: 'Forbidden', role, permission: 'kpi:read', authMode });
+      return reply.code(403).send({ error: 'Forbidden', role, permission: 'kpi:read', authMode, via: principal ? 'session' : 'header' });
     }
 
     const filterType = req.query.type && eventCycleTypes.includes(req.query.type) ? req.query.type : undefined;
@@ -3384,7 +3597,7 @@ export function buildServer(state = buildState()) {
     '/api/content/cards/:cardId/approve',
     async (req, reply) => {
       if (ensurePermission(req, reply, 'manager:write') === null) return;
-      const role = (req.headers['x-bisp-role'] as string) ?? 'manager';
+      const role = resolveRequestUser(req)?.email ?? resolveRequestRole(req);
       const card = state.contentCards.update(req.params.cardId, {
         approvalStatus: 'approved',
         approvedBy: role,
@@ -3437,7 +3650,7 @@ export function buildServer(state = buildState()) {
     '/api/content/cards/:cardId/reject',
     async (req, reply) => {
       if (ensurePermission(req, reply, 'manager:write') === null) return;
-      const role = (req.headers['x-bisp-role'] as string) ?? 'manager';
+      const role = resolveRequestUser(req)?.email ?? resolveRequestRole(req);
       const card = state.contentCards.update(req.params.cardId, {
         approvalStatus: 'rejected',
         approvedBy: role,

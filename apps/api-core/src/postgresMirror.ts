@@ -105,6 +105,31 @@ export interface WorkspaceOverviewRecord {
   upcomingMeetings: number;
 }
 
+export interface ControlCenterUserRecord {
+  id: string;
+  email: string;
+  fullName: string;
+  role: 'admin' | 'manager' | 'assist' | 'sales' | 'customer-care' | 'content' | 'viewer';
+  status: 'active' | 'disabled';
+  passwordHash: string;
+  preferences?: Record<string, unknown>;
+  lastLoginAt?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ControlCenterSessionRecord {
+  token: string;
+  userId: string;
+  role: ControlCenterUserRecord['role'];
+  issuedAt: string;
+  expiresAt: string;
+  lastSeenAt: string;
+  ip?: string;
+  userAgent?: string;
+  user?: Pick<ControlCenterUserRecord, 'id' | 'email' | 'fullName' | 'role' | 'status'>;
+}
+
 export class PostgresMirror {
   readonly enabled: boolean;
   private readonly db?: PgRuntime;
@@ -727,6 +752,8 @@ export class PostgresMirror {
       'workspace_sync_runs',
       'workspace_sheet_rows',
       'workspace_calendar_events',
+      'control_center_users',
+      'control_center_sessions',
     ];
     const out: Record<string, number> = {};
     for (const table of tables) {
@@ -881,6 +908,232 @@ export class PostgresMirror {
       createdAt: r.created_at,
       processedAt: r.processed_at ?? undefined,
     }));
+  }
+
+  async countControlCenterUsers(): Promise<number> {
+    if (!(await this.ensureReady()) || !this.db) return 0;
+    const res = await this.db.pool.query<{ count: string }>('select count(*)::text as count from control_center_users');
+    return Number(res.rows[0]?.count ?? 0);
+  }
+
+  async loadControlCenterUsers(): Promise<ControlCenterUserRecord[]> {
+    if (!(await this.ensureReady()) || !this.db) return [];
+    const res = await this.db.pool.query<{
+      id: string;
+      email: string;
+      full_name: string;
+      role: ControlCenterUserRecord['role'];
+      status: ControlCenterUserRecord['status'];
+      password_hash: string;
+      preferences: unknown;
+      last_login_at: string | null;
+      created_at: string;
+      updated_at: string;
+    }>(
+      `select id, email, full_name, role, status, password_hash, preferences, last_login_at::text, created_at::text, updated_at::text
+       from control_center_users
+       order by created_at asc`
+    );
+    return res.rows.map((row) => ({
+      id: row.id,
+      email: row.email,
+      fullName: row.full_name,
+      role: row.role,
+      status: row.status,
+      passwordHash: row.password_hash,
+      preferences: safeJson<Record<string, unknown>>(row.preferences) ?? {},
+      lastLoginAt: row.last_login_at ?? undefined,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    }));
+  }
+
+  async getControlCenterUserByEmail(email: string): Promise<ControlCenterUserRecord | null> {
+    if (!(await this.ensureReady()) || !this.db) return null;
+    const res = await this.db.pool.query<{
+      id: string;
+      email: string;
+      full_name: string;
+      role: ControlCenterUserRecord['role'];
+      status: ControlCenterUserRecord['status'];
+      password_hash: string;
+      preferences: unknown;
+      last_login_at: string | null;
+      created_at: string;
+      updated_at: string;
+    }>(
+      `select id, email, full_name, role, status, password_hash, preferences, last_login_at::text, created_at::text, updated_at::text
+       from control_center_users
+       where lower(email) = lower($1)
+       limit 1`,
+      [email]
+    );
+    const row = res.rows[0];
+    if (!row) return null;
+    return {
+      id: row.id,
+      email: row.email,
+      fullName: row.full_name,
+      role: row.role,
+      status: row.status,
+      passwordHash: row.password_hash,
+      preferences: safeJson<Record<string, unknown>>(row.preferences) ?? {},
+      lastLoginAt: row.last_login_at ?? undefined,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    };
+  }
+
+  async getControlCenterUserById(id: string): Promise<ControlCenterUserRecord | null> {
+    if (!(await this.ensureReady()) || !this.db) return null;
+    const res = await this.db.pool.query<{
+      id: string;
+      email: string;
+      full_name: string;
+      role: ControlCenterUserRecord['role'];
+      status: ControlCenterUserRecord['status'];
+      password_hash: string;
+      preferences: unknown;
+      last_login_at: string | null;
+      created_at: string;
+      updated_at: string;
+    }>(
+      `select id, email, full_name, role, status, password_hash, preferences, last_login_at::text, created_at::text, updated_at::text
+       from control_center_users
+       where id = $1
+       limit 1`,
+      [id]
+    );
+    const row = res.rows[0];
+    if (!row) return null;
+    return {
+      id: row.id,
+      email: row.email,
+      fullName: row.full_name,
+      role: row.role,
+      status: row.status,
+      passwordHash: row.password_hash,
+      preferences: safeJson<Record<string, unknown>>(row.preferences) ?? {},
+      lastLoginAt: row.last_login_at ?? undefined,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    };
+  }
+
+  async saveControlCenterUser(user: ControlCenterUserRecord): Promise<void> {
+    if (!(await this.ensureReady()) || !this.db) return;
+    await this.db.pool.query(
+      `insert into control_center_users (id, email, full_name, role, status, password_hash, preferences, last_login_at, created_at, updated_at)
+       values ($1,$2,$3,$4,$5,$6,$7::jsonb,$8::timestamptz,$9::timestamptz,$10::timestamptz)
+       on conflict (id) do update
+       set email=excluded.email,
+           full_name=excluded.full_name,
+           role=excluded.role,
+           status=excluded.status,
+           password_hash=excluded.password_hash,
+           preferences=excluded.preferences,
+           last_login_at=excluded.last_login_at,
+           updated_at=excluded.updated_at`,
+      [
+        user.id,
+        user.email,
+        user.fullName,
+        user.role,
+        user.status,
+        user.passwordHash,
+        JSON.stringify(user.preferences ?? {}),
+        user.lastLoginAt ?? null,
+        user.createdAt,
+        user.updatedAt,
+      ],
+    );
+  }
+
+  async saveControlCenterSession(session: ControlCenterSessionRecord): Promise<void> {
+    if (!(await this.ensureReady()) || !this.db) return;
+    await this.db.pool.query(
+      `insert into control_center_sessions (token, user_id, role, issued_at, expires_at, last_seen_at, ip, user_agent)
+       values ($1,$2,$3,$4::timestamptz,$5::timestamptz,$6::timestamptz,$7,$8)
+       on conflict (token) do update
+       set role=excluded.role,
+           expires_at=excluded.expires_at,
+           last_seen_at=excluded.last_seen_at,
+           ip=excluded.ip,
+           user_agent=excluded.user_agent`,
+      [
+        session.token,
+        session.userId,
+        session.role,
+        session.issuedAt,
+        session.expiresAt,
+        session.lastSeenAt,
+        session.ip ?? null,
+        session.userAgent ?? null,
+      ],
+    );
+  }
+
+  async getControlCenterSession(token: string): Promise<ControlCenterSessionRecord | null> {
+    if (!(await this.ensureReady()) || !this.db) return null;
+    const res = await this.db.pool.query<{
+      token: string;
+      user_id: string;
+      role: ControlCenterUserRecord['role'];
+      issued_at: string;
+      expires_at: string;
+      last_seen_at: string;
+      ip: string | null;
+      user_agent: string | null;
+      user_email: string;
+      user_full_name: string;
+      user_role: ControlCenterUserRecord['role'];
+      user_status: ControlCenterUserRecord['status'];
+    }>(
+      `select s.token, s.user_id, s.role, s.issued_at::text, s.expires_at::text, s.last_seen_at::text, s.ip, s.user_agent,
+              u.email as user_email, u.full_name as user_full_name, u.role as user_role, u.status as user_status
+       from control_center_sessions s
+       join control_center_users u on u.id = s.user_id
+       where s.token = $1
+       limit 1`,
+      [token],
+    );
+    const row = res.rows[0];
+    if (!row) return null;
+    return {
+      token: row.token,
+      userId: row.user_id,
+      role: row.role,
+      issuedAt: row.issued_at,
+      expiresAt: row.expires_at,
+      lastSeenAt: row.last_seen_at,
+      ip: row.ip ?? undefined,
+      userAgent: row.user_agent ?? undefined,
+      user: {
+        id: row.user_id,
+        email: row.user_email,
+        fullName: row.user_full_name,
+        role: row.user_role,
+        status: row.user_status,
+      },
+    };
+  }
+
+  async touchControlCenterSession(token: string, seenAt: string): Promise<void> {
+    if (!(await this.ensureReady()) || !this.db) return;
+    await this.db.pool.query(
+      `update control_center_sessions set last_seen_at = $2::timestamptz where token = $1`,
+      [token, seenAt],
+    );
+  }
+
+  async deleteControlCenterSession(token: string): Promise<void> {
+    if (!(await this.ensureReady()) || !this.db) return;
+    await this.db.pool.query('delete from control_center_sessions where token = $1', [token]);
+  }
+
+  async deleteExpiredControlCenterSessions(): Promise<void> {
+    if (!(await this.ensureReady()) || !this.db) return;
+    await this.db.pool.query('delete from control_center_sessions where expires_at < now()');
   }
 }
 
