@@ -1,0 +1,399 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>eeess control hub</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        --bg: #09111d;
+        --bg-alt: #111b2a;
+        --surface: rgba(17, 27, 42, 0.88);
+        --surface-strong: rgba(24, 38, 58, 0.96);
+        --border: rgba(122, 162, 247, 0.22);
+        --text: #edf3ff;
+        --muted: #9fb0d0;
+        --accent: #ff5d62;
+        --accent-2: #67d8ff;
+        --glow: rgba(103, 216, 255, 0.18);
+        --shadow: 0 18px 52px rgba(0, 0, 0, 0.34);
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        min-height: 100vh;
+        font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        color: var(--text);
+        background:
+          radial-gradient(circle at top, rgba(103, 216, 255, 0.14), transparent 28%),
+          radial-gradient(circle at 85% 12%, rgba(255, 93, 98, 0.11), transparent 24%),
+          linear-gradient(180deg, #0b1321 0%, #09111d 54%, #070d17 100%);
+      }
+
+      .shell {
+        width: min(1180px, calc(100vw - 32px));
+        margin: 0 auto;
+        padding: 40px 0 28px;
+      }
+
+      .hero {
+        display: grid;
+        grid-template-columns: 1.35fr 0.85fr;
+        gap: 20px;
+        align-items: stretch;
+        margin-bottom: 22px;
+      }
+
+      .panel {
+        position: relative;
+        overflow: hidden;
+        border: 1px solid var(--border);
+        border-radius: 28px;
+        background: linear-gradient(180deg, var(--surface) 0%, rgba(10, 17, 28, 0.92) 100%);
+        box-shadow: var(--shadow);
+      }
+
+      .panel::after {
+        content: "";
+        position: absolute;
+        inset: 0;
+        pointer-events: none;
+        background: linear-gradient(140deg, rgba(255,255,255,0.05), transparent 28%);
+      }
+
+      .hero-copy {
+        padding: 28px 30px 30px;
+      }
+
+      .eyebrow {
+        margin: 0 0 12px;
+        font-size: 12px;
+        letter-spacing: 0.18em;
+        text-transform: uppercase;
+        color: var(--accent);
+        font-weight: 800;
+      }
+
+      h1 {
+        margin: 0 0 14px;
+        font-size: clamp(34px, 5vw, 56px);
+        line-height: 0.96;
+        letter-spacing: -0.04em;
+      }
+
+      .hero-copy p {
+        margin: 0;
+        max-width: 56ch;
+        color: var(--muted);
+        font-size: 16px;
+        line-height: 1.65;
+      }
+
+      .hero-meta {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 14px;
+        padding: 22px;
+      }
+
+      .stat {
+        border-radius: 18px;
+        border: 1px solid rgba(159, 176, 208, 0.16);
+        background: rgba(255, 255, 255, 0.03);
+        padding: 16px;
+      }
+
+      .stat strong {
+        display: block;
+        font-size: 13px;
+        color: var(--muted);
+        margin-bottom: 10px;
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+      }
+
+      .stat span {
+        display: block;
+        font-size: 18px;
+        font-weight: 700;
+        color: var(--text);
+      }
+
+      .grid {
+        display: grid;
+        grid-template-columns: repeat(5, minmax(0, 1fr));
+        gap: 18px;
+      }
+
+      .tile {
+        position: relative;
+        display: flex;
+        flex-direction: column;
+        gap: 16px;
+        min-height: 210px;
+        padding: 22px 20px;
+        text-decoration: none;
+        color: inherit;
+        border-radius: 24px;
+        border: 1px solid rgba(159, 176, 208, 0.16);
+        background: linear-gradient(180deg, rgba(22, 33, 48, 0.92) 0%, rgba(10, 17, 27, 0.92) 100%);
+        transition: transform 180ms ease, border-color 180ms ease, box-shadow 180ms ease, background 180ms ease;
+        box-shadow: 0 14px 40px rgba(0, 0, 0, 0.28);
+      }
+
+      .tile:hover {
+        transform: translateY(-4px);
+        border-color: rgba(103, 216, 255, 0.42);
+        box-shadow: 0 20px 50px rgba(0, 0, 0, 0.36), 0 0 0 1px rgba(103, 216, 255, 0.08) inset;
+        background: linear-gradient(180deg, rgba(29, 43, 62, 0.96) 0%, rgba(12, 20, 31, 0.96) 100%);
+      }
+
+      .tile:focus-visible {
+        outline: 2px solid var(--accent-2);
+        outline-offset: 3px;
+      }
+
+      .icon {
+        width: 60px;
+        height: 60px;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        border-radius: 18px;
+        background: radial-gradient(circle at top, rgba(103, 216, 255, 0.26), rgba(9, 17, 29, 0.12));
+        box-shadow: 0 0 0 1px rgba(103, 216, 255, 0.15) inset;
+      }
+
+      .icon svg {
+        width: 30px;
+        height: 30px;
+        stroke: var(--accent-2);
+        fill: none;
+        stroke-width: 1.75;
+        stroke-linecap: round;
+        stroke-linejoin: round;
+      }
+
+      .label {
+        font-size: 21px;
+        font-weight: 800;
+        letter-spacing: -0.03em;
+      }
+
+      .desc {
+        color: var(--muted);
+        font-size: 14px;
+        line-height: 1.55;
+      }
+
+      .chip {
+        margin-top: auto;
+        align-self: flex-start;
+        padding: 7px 11px;
+        border-radius: 999px;
+        background: rgba(255, 93, 98, 0.14);
+        color: #ffd0d2;
+        font-size: 12px;
+        font-weight: 700;
+        letter-spacing: 0.05em;
+        text-transform: uppercase;
+      }
+
+      .tooltip {
+        position: absolute;
+        left: 20px;
+        right: 20px;
+        bottom: 18px;
+        padding: 10px 12px;
+        border-radius: 14px;
+        background: rgba(6, 10, 16, 0.94);
+        color: #c8d6f0;
+        border: 1px solid rgba(103, 216, 255, 0.18);
+        font-size: 12px;
+        line-height: 1.45;
+        opacity: 0;
+        transform: translateY(8px);
+        transition: opacity 160ms ease, transform 160ms ease;
+        pointer-events: none;
+      }
+
+      .tile:hover .tooltip,
+      .tile:focus-visible .tooltip {
+        opacity: 1;
+        transform: translateY(0);
+      }
+
+      footer {
+        display: flex;
+        justify-content: space-between;
+        gap: 16px;
+        align-items: center;
+        margin-top: 18px;
+        padding: 18px 4px 0;
+        color: var(--muted);
+        font-size: 13px;
+      }
+
+      footer a {
+        color: inherit;
+      }
+
+      @media (max-width: 1100px) {
+        .grid {
+          grid-template-columns: repeat(3, minmax(0, 1fr));
+        }
+      }
+
+      @media (max-width: 820px) {
+        .hero {
+          grid-template-columns: 1fr;
+        }
+
+        .grid {
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+        }
+      }
+
+      @media (max-width: 560px) {
+        .shell {
+          width: min(100vw - 20px, 100%);
+          padding-top: 18px;
+        }
+
+        .grid,
+        .hero-meta {
+          grid-template-columns: 1fr;
+        }
+
+        .tile {
+          min-height: 190px;
+        }
+
+        footer {
+          flex-direction: column;
+          align-items: flex-start;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <main class="shell">
+      <section class="hero">
+        <article class="panel hero-copy">
+          <p class="eyebrow">eeess workspace hub</p>
+          <h1>CopilotRM operations entrypoint</h1>
+          <p>
+            Select the area you need. This hub keeps the operational surfaces separated:
+            assist intake, CRM workspace, manager control room, infrastructure status,
+            and the live Playwright desktop used to inspect Gemini sessions.
+          </p>
+        </article>
+        <aside class="panel hero-meta">
+          <div class="stat">
+            <strong>Main workspaces</strong>
+            <span>Assist, CRM, Manager</span>
+          </div>
+          <div class="stat">
+            <strong>Live visibility</strong>
+            <span>API status + Playwright VNC</span>
+          </div>
+          <div class="stat">
+            <strong>Primary domain</strong>
+            <span>app.eeess.cyou</span>
+          </div>
+          <div class="stat">
+            <strong>Session scope</strong>
+            <span>Shared channel flows + agent views</span>
+          </div>
+        </aside>
+      </section>
+
+      <section class="grid" aria-label="Platform entrypoints">
+        <a class="tile" href="https://app.eeess.cyou" aria-label="Open Assist Desk">
+          <span class="icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24">
+              <path d="M5 5h14v10H8l-3 3V5z" />
+              <path d="M8 9h8" />
+              <path d="M8 12h5" />
+            </svg>
+          </span>
+          <span class="label">Assist Desk</span>
+          <span class="desc">Natural-language intake, ticket capture, and guided assist workflows.</span>
+          <span class="chip">primary</span>
+          <span class="tooltip">Operator-facing entrypoint for acceptance, assisted form fill, ticket updates, and customer handling.</span>
+        </a>
+
+        <a class="tile" href="https://crm.eeess.cyou" aria-label="Open CRM Workspace">
+          <span class="icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24">
+              <path d="M4 7h16" />
+              <path d="M4 12h10" />
+              <path d="M4 17h7" />
+              <path d="M17 15l3 3-3 3" />
+              <path d="M20 18h-6" />
+            </svg>
+          </span>
+          <span class="label">CRM</span>
+          <span class="desc">Customer workspace, consult flows, offers, and commercial operations.</span>
+          <span class="chip">workspace</span>
+          <span class="tooltip">Use this for customer records, offer navigation, consult agent flows, and CRM-side actions.</span>
+        </a>
+
+        <a class="tile" href="https://manager.eeess.cyou" aria-label="Open Manager Control Room">
+          <span class="icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24">
+              <path d="M4 18V7l8-4 8 4v11" />
+              <path d="M9 18v-4h6v4" />
+              <path d="M4 18h16" />
+            </svg>
+          </span>
+          <span class="label">Manager</span>
+          <span class="desc">Control room for approvals, telemetry, objectives, and operations visibility.</span>
+          <span class="chip">control</span>
+          <span class="tooltip">The management surface for KPIs, approvals, channel telemetry, workspace state, and runtime checks.</span>
+        </a>
+
+        <a class="tile" href="https://api.eeess.cyou/api/system/infra" aria-label="Open API Status">
+          <span class="icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24">
+              <path d="M5 18h14" />
+              <path d="M7 14l3-3 3 2 4-5" />
+              <path d="M7 18v-4" />
+              <path d="M12 18v-6" />
+              <path d="M17 18v-9" />
+            </svg>
+          </span>
+          <span class="label">API Status</span>
+          <span class="desc">Infrastructure snapshot, backend status, and runtime checks.</span>
+          <span class="chip">ops</span>
+          <span class="tooltip">Direct link to the backend infrastructure endpoint for health and service-level verification.</span>
+        </a>
+
+        <a class="tile" href="https://vnc.eeess.cyou/vnc.html?autoconnect=true&amp;resize=scale&amp;reconnect=true" aria-label="Open Playwright VNC">
+          <span class="icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24">
+              <path d="M4 6h16v10H4z" />
+              <path d="M9 18h6" />
+              <path d="M12 16v2" />
+              <path d="M8 10l2 2 6-6" />
+            </svg>
+          </span>
+          <span class="label">Playwright VNC</span>
+          <span class="desc">Live browser desktop for Gemini session visibility and validation.</span>
+          <span class="chip">live</span>
+          <span class="tooltip">Opens the noVNC session attached to display :99, useful to watch Playwright/Gemini behavior in real time.</span>
+        </a>
+      </section>
+
+      <footer>
+        <span>eeess control hub · fast entrypoint for CopilotRM operations.</span>
+        <span>Domains: <a href="https://eeess.cyou">eeess.cyou</a> · <a href="https://www.eeess.cyou">www.eeess.cyou</a></span>
+      </footer>
+    </main>
+  </body>
+</html>
