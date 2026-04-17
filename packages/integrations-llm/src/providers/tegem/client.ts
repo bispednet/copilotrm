@@ -103,6 +103,17 @@ function flattenMessages(messages: LLMMessage[]): string {
   return parts.join('\n\n');
 }
 
+function getStreamOverrides(opts?: LLMOptions): { maxDurationMs?: number; firstChunkTimeoutMs?: number } {
+  switch (opts?.tier) {
+    case 'small':
+      return { firstChunkTimeoutMs: 6_000, maxDurationMs: 18_000 };
+    case 'medium':
+      return { firstChunkTimeoutMs: 8_000, maxDurationMs: 28_000 };
+    default:
+      return {};
+  }
+}
+
 function getRuntime(config: TeGemProviderConfig): TeGemRuntime {
   const key = runtimeKey(config);
   const cached = runtimes.get(key);
@@ -182,7 +193,7 @@ export function createTeGemClient(config: TeGemProviderConfig): LLMClient {
         const baseline = await runtime.provider.snapshotConversation(page);
         await runtime.provider.sendPrompt(page, prompt);
 
-        const stream = runtime.provider.streamResponse(page, baseline);
+        const stream = runtime.provider.streamResponse(page, baseline, getStreamOverrides(opts));
         let finalContent = '';
         while (true) {
           const next = await stream.next();
@@ -213,7 +224,7 @@ export function createTeGemClient(config: TeGemProviderConfig): LLMClient {
         const baseline = await runtime.provider.snapshotConversation(page);
         await runtime.provider.sendPrompt(page, prompt);
 
-        const stream = runtime.provider.streamResponse(page, baseline);
+        const stream = runtime.provider.streamResponse(page, baseline, getStreamOverrides(opts));
         let latest = '';
         let accumulated = '';
         while (true) {
