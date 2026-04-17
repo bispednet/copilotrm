@@ -12,6 +12,8 @@ The product must provide:
 - persistent user management
 - team coordination across WhatsApp, Telegram, Google Calendar, and Google Sheets
 - natural-language flows for non-technical operators
+- persistent customer identity resolution, duplicate review, and lifetime commercial history
+- live multi-agent streaming so operators can see the reasoning thread forming in real time
 
 ## Product Surfaces
 
@@ -106,6 +108,23 @@ The UI must reflect the actual authenticated user, not a fake role switch.
 
 ## Core Pages Inside Manager
 
+### Customer Control
+
+Purpose:
+
+- inspect customer master records
+- review ambiguous or duplicate contacts
+- approve new customer entries created from inbound channels or assist flows
+- inspect full commercial and operational history per customer
+
+Must include:
+
+- pending customer approvals
+- possible duplicate clusters
+- customer timeline
+- attached opportunities, proposals, tickets, and follow-ups
+- manual merge/reject/approve actions
+
 ### Home
 
 Purpose:
@@ -184,6 +203,25 @@ Keep and normalize:
 
 These pages should be reachable from the control center without feeling like separate products.
 
+## Customer Identity and History Model
+
+The system must treat customer identity as a first-class operational object.
+
+Rules:
+
+- every inbound contact is matched against existing customers by phone, email, and name similarity
+- if certainty is low, create a new record as `needs-approval`
+- if similar customers exist, surface duplicates for human review before the record is treated as canonical
+- every proposal, opportunity, consult output, and follow-up must remain linked to the customer forever
+- assist outcomes and commercial actions must enrich the same customer history instead of producing detached drafts
+
+This is required to avoid:
+
+- duplicate customers
+- lost offer history
+- orphaned proposals
+- weak agent context on follow-up conversations
+
 ## Backend Work Required
 
 ### Auth/session endpoints
@@ -207,6 +245,13 @@ These pages should be reachable from the control center without feeling like sep
 - `POST /api/team/meetings`
 - `POST /api/team/broadcast`
 
+### Customer endpoints
+
+- `POST /api/customers/resolve`
+- `PATCH /api/customers/:id/approval`
+- `GET /api/customers/:id/opportunities`
+- `GET /api/customers/:id/resolutions`
+
 ### Authorization model
 
 All existing privileged endpoints must accept:
@@ -228,6 +273,24 @@ Therefore:
 - dangerous operations must be clearly framed
 - empty states must explain what to do next
 - admin pages must be readable by an entrepreneur, not just an engineer
+- live agent threads must show partial drafting, not only a generic typing indicator
+
+## Swarm Quality Rules
+
+To avoid shallow, premature, or commercially dangerous outputs, the swarm must enforce:
+
+- no offer proposal before minimum factual data exists
+- explicit uncertainty handling
+- dedicated customer-resolution participation when identity is unclear
+- product/offers lookup grounded on active catalog data, not assumptions
+- critique before final synthesis when commercial or technical claims are weak
+
+The final output should always distinguish:
+
+- verified facts
+- missing data
+- next action
+- commercial opportunity, if and only if grounded
 
 ## Deployment Expectations
 
@@ -245,5 +308,7 @@ Therefore:
 3. Add common `Home` entry in all web apps.
 4. Build Team page on top of existing channel/workspace integrations.
 5. Add Admin Panel user management on top of new control-center tables.
-6. Update portal tiles and links so the landing page exposes Team/Admin clearly.
-7. Refresh docs and production usage notes.
+6. Add customer-resolution and customer-history control surfaces.
+7. Expose live streaming agent thread in CRM and channel surfaces.
+8. Update portal tiles and links so the landing page exposes Team/Admin clearly.
+9. Refresh docs and production usage notes.

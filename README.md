@@ -2,6 +2,15 @@
 
 Monorepo TypeScript per un AI CRM & Swarm Automation Layer orientato al retail/assistenza tecnica.
 
+## Novità operative rilevanti
+
+- risoluzione anagrafica cliente con deduplica, scoring e `needs-approval`
+- storico cliente persistente per opportunità, proposte, follow-up e azioni commerciali
+- agente dedicato `Anagrafiche` nel flusso swarm per nuovi clienti, contatti ambigui e disambiguazione
+- streaming conversazionale reale nel CRM: non solo `sta scrivendo…`, ma testo live agente-per-agente
+- lookup cliente da chat libera tramite nome/telefono con creazione controllata della master anagrafica
+- opportunità commerciali e risultati assistenza sempre appesi al cliente e consultabili nello storico
+
 ## Surface di prodotto
 
 - `https://www.eeess.cyou` — home portal con ingresso alle aree operative
@@ -47,6 +56,13 @@ packages/
   personas            Definizioni persona agenti
   prompts             Prompt builder functions
 ```
+
+### Agenti di sistema
+
+- `Orchestratore` coordina il turn taking del team
+- `Critico` fa review avversariale e blocca proposte premature
+- `Moderatore` sintetizza e produce il risultato finale
+- `Anagrafiche` gestisce lookup cliente, disambiguazione, deduplica e creazione `needs-approval`
 
 ---
 
@@ -150,6 +166,43 @@ Vedere `.env.example` per la lista completa.
 
 ---
 
+## Customer Resolution e Storico commerciale
+
+Il prodotto non tratta più il cliente come un payload volatile del singolo ticket.
+
+Ora il runtime:
+
+- cerca clienti esistenti tramite telefono, email e similarità sul nome
+- distingue tra match esatto, possibile duplicato e nuovo cliente
+- crea nuove anagrafiche con `approvalStatus = needs-approval` quando i dati non sono ancora affidabili
+- salva i casi di risoluzione in `customer_resolution_cases`
+- salva opportunità, proposte e output commerciali in `customer_opportunities`
+- collega ticket, esiti assistenza e consult proposal allo stesso `customerId`
+
+Questo permette:
+
+- controllo umano dei duplicati
+- storico cliente permanente
+- audit commerciale reale
+- contesto migliore per gli agenti nelle conversazioni successive
+
+---
+
+## Streaming conversazionale
+
+Il CRM e i canali non si limitano più a un indicatore generico di digitazione.
+
+Con provider che supportano streaming, il runtime espone chunk parziali agente-per-agente via SSE:
+
+- `typing` per inizio turno agente
+- `chunk` per testo parziale live
+- `message` per messaggio consolidato
+- `done` per la sintesi finale
+
+Sul frontend CRM questo viene renderizzato come thread operativo vivo, più vicino al comportamento già sperimentato su TeGem.
+
+---
+
 ## API principali
 
 ```
@@ -159,6 +212,10 @@ POST /api/auth/bootstrap
 POST /api/auth/login
 POST /api/auth/logout
 GET  /api/auth/me
+POST /api/customers/resolve
+PATCH /api/customers/:id/approval
+GET  /api/customers/:id/opportunities
+GET  /api/customers/:id/resolutions
 GET  /api/customers
 GET  /api/offers
 GET  /api/objectives

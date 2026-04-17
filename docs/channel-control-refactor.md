@@ -10,6 +10,7 @@ Turn Telegram and WhatsApp from thin transport adapters into a shared control su
 - shared telemetry visible from admin
 - Google Workspace as shared operational memory for channels
 - one logic path reused by both channels
+- customer-aware routing with approval-safe anagraphic creation and duplicate signaling
 
 ## Current Gaps
 
@@ -21,6 +22,8 @@ Turn Telegram and WhatsApp from thin transport adapters into a shared control su
 - admin can see adapter availability, but not real channel usage/control telemetry
 - no shared operational memory for agenda, meetings, shifts, or sheet-driven knowledge
 - no persistent group-aware control flow for WhatsApp
+- no customer resolution memory shared between assist, CRM, and channels
+- no live partial streaming visibility on the operator surfaces
 
 ## Refactor Strategy
 
@@ -46,6 +49,7 @@ Responsibilities:
 - quick action execution
 - conversational fallback through existing `/api/chat`
 - workspace-aware queries grounded on synced Sheets + Calendar data
+- customer resolution and commercial-history enrichment before agent handoff
 
 This keeps Telegram and WhatsApp behavior aligned and gives admin a single data source.
 
@@ -84,6 +88,14 @@ Expose a dedicated admin endpoint with:
 
 Add a lightweight manager view for this data.
 
+### 7. Customer resolution and live drafting
+
+- resolve or create customer records before free-form swarm work begins
+- create `needs-approval` customers when identity is not certain
+- surface duplicate candidates for human review
+- attach opportunities and proposals to customer history
+- expose partial agent drafting to the CRM frontend instead of only `typing`
+
 ## Scope of First Pass
 
 Implemented in this refactor:
@@ -96,11 +108,13 @@ Implemented in this refactor:
 - TeGem/Gemini tab session routing for shared channel assistants and per-agent frontend orchestration
 - Postgres persistence for channel peers/events
 - Google Workspace sync + agenda/shift/meeting operations
+- customer resolution records and customer opportunity history in Postgres
 - admin endpoint + manager rendering for channel-control and workspace
 - env/docs updates
 - control-center auth tables and session-aware manager routing
 - Team Hub page with broadcast, workspace Q&A, meeting creation, peer visibility, and synced agenda/shift panels
 - Admin Panel page with DB-backed user lifecycle management
+- live SSE chunk propagation from TeGem-compatible providers into CRM thread rendering
 
 Explicitly deferred:
 
@@ -117,3 +131,5 @@ Explicitly deferred:
 - free-text from both channels still reaches conversational logic
 - admin can inspect channel control metrics from `api-core`
 - workspace state is persisted in Postgres and visible from admin
+- ambiguous inbound customers never bypass review silently
+- operators can see partial agent output while the answer is being composed
