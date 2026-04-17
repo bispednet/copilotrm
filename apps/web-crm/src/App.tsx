@@ -206,6 +206,7 @@ function App() {
   const [streamingThread, setStreamingThread] = useState<SwarmThreadMsg[]>([]);
   const [typingAgent, setTypingAgent] = useState<{ agent: string; agentRole: string } | null>(null);
   const [typingDraft, setTypingDraft] = useState<SwarmThreadMsg | null>(null);
+  const [artifactBusy, setArtifactBusy] = useState<Record<string, boolean>>({});
   const streamingThreadRef = useRef<SwarmThreadMsg[]>([]);
   const chatBoxRef = useRef<HTMLDivElement>(null);
 
@@ -404,6 +405,80 @@ function App() {
       setChatBusy(false);
     }
   }, [chatInput, chatBusy, chatCustomerId, chatHistory.length, chatSessionId]);
+
+  const patchAssistantArtifacts = useCallback((messageIndex: number, updater: (artifacts: ChatExecutionArtifacts) => ChatExecutionArtifacts) => {
+    setChatHistory((prev) => prev.map((entry, index) => {
+      if (index !== messageIndex || entry.role !== 'assistant' || !entry.executionArtifacts) return entry;
+      return {
+        ...entry,
+        executionArtifacts: updater(entry.executionArtifacts),
+      };
+    }));
+  }, []);
+
+  const runArtifactAction = useCallback(async (key: string, fn: () => Promise<void>) => {
+    setArtifactBusy((prev) => ({ ...prev, [key]: true }));
+    try {
+      await fn();
+    } finally {
+      setArtifactBusy((prev) => {
+        const next = { ...prev };
+        delete next[key];
+        return next;
+      });
+    }
+  }, []);
+
+  const approveDraftArtifact = useCallback(async (messageIndex: number, draftId: string) => {
+    await runArtifactAction(`approve:${draftId}`, async () => {
+      const updated = await apiFetch(`/api/outbox/${draftId}/approve`, {
+        method: 'POST',
+        body: JSON.stringify({ actor: 'crm-ui' }),
+      }).then(async (res) => {
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        return res.json();
+      });
+      patchAssistantArtifacts(messageIndex, (artifacts) => ({
+        ...artifacts,
+        outbox: artifacts.outbox.map((draft) => draft.id === draftId ? { ...draft, status: updated.status ?? 'approved' } : draft),
+      }));
+      showToast('ok', 'Draft approvato');
+    });
+  }, [patchAssistantArtifacts, runArtifactAction, showToast]);
+
+  const sendDraftArtifact = useCallback(async (messageIndex: number, draftId: string, mode: 'send' | 'approve-send' = 'send') => {
+    await runArtifactAction(`${mode}:${draftId}`, async () => {
+      const updated = await apiFetch(`/api/outbox/${draftId}/${mode === 'send' ? 'send' : 'approve-send'}`, {
+        method: 'POST',
+        body: JSON.stringify({ actor: 'crm-ui' }),
+      }).then(async (res) => {
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        return res.json();
+      });
+      patchAssistantArtifacts(messageIndex, (artifacts) => ({
+        ...artifacts,
+        outbox: artifacts.outbox.map((draft) => draft.id === draftId ? { ...draft, status: updated.status ?? 'sent' } : draft),
+      }));
+      showToast('ok', 'Draft inviato');
+    });
+  }, [patchAssistantArtifacts, runArtifactAction, showToast]);
+
+  const completeTaskArtifact = useCallback(async (messageIndex: number, taskId: string) => {
+    await runArtifactAction(`task:${taskId}`, async () => {
+      const updated = await apiFetch(`/api/tasks/${taskId}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ status: 'done' }),
+      }).then(async (res) => {
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        return res.json();
+      });
+      patchAssistantArtifacts(messageIndex, (artifacts) => ({
+        ...artifacts,
+        tasks: artifacts.tasks.map((task) => task.id === taskId ? { ...task, status: updated.status ?? 'done' } : task),
+      }));
+      showToast('ok', 'Task completata');
+    });
+  }, [patchAssistantArtifacts, runArtifactAction, showToast]);
 
   // ── Nav ──────────────────────────────────────────────────────────────────────
   const navItems: Array<{ key: Page; label: string; icon: string }> = [
@@ -1091,21 +1166,89 @@ function App() {
                             {m.executionArtifacts.consultTopOffer && <span>📶 offerta: <strong>{m.executionArtifacts.consultTopOffer.title}</strong></span>}
                           </div>
                           {m.executionArtifacts.tasks.length > 0 && (
-                            <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
                               {m.executionArtifacts.tasks.slice(0, 3).map((task) => (
-                                <div key={task.id} style={{ fontSize: 12, color: 'var(--text)' }}>
-                                  • <strong>{task.title}</strong> · {task.assigneeRole} · p{task.priority}
+                                <div key={task.id} style={{ fontSize: 12, color: 'var(--text)', border: '1px solid var(--border)', borderRadius: 8, padding: '8px 10px', display: 'flex', flexDirection: 'column', gap: 6 }}>
+                                  <div>• <strong>{task.title}</strong> · {task.assigneeRole} · p{task.priority}</div>
+                                  <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+                                    <span className="muted">status: <strong>{task.status}</strong></span>
+                                    {task.status !== 'done' && (
+                                      <button
+                                        className="ghost"
+                                        style={{ fontSize: 12, padding: '4px 10px' }}
+                                        disabled={Boolean(artifactBusy[`task:${task.id}`])}
+                                        onClick={() => void completeTaskArtifact(idx, task.id)}
+                                      >
+                                        {artifactBusy[`task:${task.id}`] ? 'Updating…' : 'Segna done'}
+                                      </button>
+                                    )}
+                                  </div>
                                 </div>
                               ))}
                             </div>
                           )}
                           {m.executionArtifacts.outbox.length > 0 && (
-                            <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-                              {m.executionArtifacts.outbox.slice(0, 2).map((draft) => (
-                                <div key={draft.id} style={{ fontSize: 12, color: 'var(--muted)' }}>
-                                  • {draft.channel}/{draft.audience} · {draft.status} · {draft.body.slice(0, 120)}{draft.body.length > 120 ? '…' : ''}
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                              {m.executionArtifacts.outbox.slice(0, 3).map((draft) => (
+                                <div key={draft.id} style={{ fontSize: 12, color: 'var(--muted)', border: '1px solid var(--border)', borderRadius: 8, padding: '8px 10px', display: 'flex', flexDirection: 'column', gap: 6 }}>
+                                  <div>• {draft.channel}/{draft.audience} · <strong>{draft.status}</strong></div>
+                                  <div>{draft.body.slice(0, 160)}{draft.body.length > 160 ? '…' : ''}</div>
+                                  <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                                    {draft.status === 'pending-approval' && (
+                                      <>
+                                        <button
+                                          className="ghost"
+                                          style={{ fontSize: 12, padding: '4px 10px' }}
+                                          disabled={Boolean(artifactBusy[`approve:${draft.id}`])}
+                                          onClick={() => void approveDraftArtifact(idx, draft.id)}
+                                        >
+                                          {artifactBusy[`approve:${draft.id}`] ? 'Approving…' : 'Approva'}
+                                        </button>
+                                        <button
+                                          className="ghost"
+                                          style={{ fontSize: 12, padding: '4px 10px' }}
+                                          disabled={Boolean(artifactBusy[`approve-send:${draft.id}`])}
+                                          onClick={() => void sendDraftArtifact(idx, draft.id, 'approve-send')}
+                                        >
+                                          {artifactBusy[`approve-send:${draft.id}`] ? 'Sending…' : 'Approva+Invia'}
+                                        </button>
+                                      </>
+                                    )}
+                                    {(draft.status === 'approved' || draft.status === 'queued') && (
+                                      <button
+                                        className="ghost"
+                                        style={{ fontSize: 12, padding: '4px 10px' }}
+                                        disabled={Boolean(artifactBusy[`send:${draft.id}`])}
+                                        onClick={() => void sendDraftArtifact(idx, draft.id, 'send')}
+                                      >
+                                        {artifactBusy[`send:${draft.id}`] ? 'Sending…' : 'Invia'}
+                                      </button>
+                                    )}
+                                  </div>
                                 </div>
                               ))}
+                            </div>
+                          )}
+                          {(m.executionArtifacts.opportunity || m.executionArtifacts.consultTopOffer || m.customerFound) && (
+                            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                              {m.customerFound && (
+                                <button
+                                  className="ghost"
+                                  style={{ fontSize: 12, padding: '4px 10px' }}
+                                  onClick={() => { setPage('customers'); setChatCustomerId(m.customerFound?.id ?? ''); }}
+                                >
+                                  Apri cliente
+                                </button>
+                              )}
+                              {m.executionArtifacts.consultTopOffer && (
+                                <button
+                                  className="ghost"
+                                  style={{ fontSize: 12, padding: '4px 10px' }}
+                                  onClick={() => { setConsultOfferId(m.executionArtifacts?.consultTopOffer?.id ?? ''); setPage('consult'); }}
+                                >
+                                  Apri offerta
+                                </button>
+                              )}
                             </div>
                           )}
                         </div>
