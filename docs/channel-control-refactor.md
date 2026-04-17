@@ -115,6 +115,8 @@ Implemented in this refactor:
 - Team Hub page with broadcast, workspace Q&A, meeting creation, peer visibility, and synced agenda/shift panels
 - Admin Panel page with DB-backed user lifecycle management
 - live SSE chunk propagation from TeGem-compatible providers into CRM thread rendering
+- channel replies enriched with execution artifacts that can be approved or completed directly from Telegram / WhatsApp
+- dedupe of task / draft / opportunity artifacts so near-identical requests do not create duplicate operational output
 
 Explicitly deferred:
 
@@ -133,3 +135,4 @@ Explicitly deferred:
 - workspace state is persisted in Postgres and visible from admin
 - ambiguous inbound customers never bypass review silently
 - operators can see partial agent output while the answer is being composed
+- pending drafts and tasks emitted by `/api/chat` can be acted on from Telegram / WhatsApp without switching to the manager UI

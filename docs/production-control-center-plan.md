@@ -17,6 +17,8 @@ The product must provide:
 - orchestrator-gated swarm reviews before final synthesis
 - real telco coverage lookup from address, not just generic sales heuristics
 - execution artifacts generated directly from CRM chat: persisted tasks, outbox drafts, and grounded opportunities
+- artifact execution controls directly inside CRM chat plus channel-side approvals for WhatsApp / Telegram
+- deduplicated operational output so the same customer prompt does not spawn duplicate tasks or opportunities
 
 ## Product Surfaces
 

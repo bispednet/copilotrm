@@ -13,6 +13,9 @@ Monorepo TypeScript per un AI CRM & Swarm Automation Layer orientato al retail/a
 - lookup cliente da chat libera tramite nome/telefono con creazione controllata della master anagrafica
 - opportunità commerciali e risultati assistenza sempre appesi al cliente e consultabili nello storico
 - la chat CRM può materializzare artefatti operativi persistiti: task, draft outbox e opportunità
+- artefatti operativi gestibili direttamente dal CRM (`done task`, `approva`, `approva+invia`, `invia`)
+- deduplica su task, draft e opportunità per evitare doppie emissioni su prompt simili
+- gli stessi artefatti vengono esposti anche su WhatsApp / Telegram con bottoni approvabili
 
 ## Surface di prodotto
 
@@ -209,6 +212,12 @@ Il provider `tegem` è stato anche ottimizzato per:
 - cold-start più rapido delle tab Gemini
 - polling stream più serrato
 - invio prompt più aggressivo nei casi text-only
+
+Il CRM rende ora gli artefatti della sintesi operativi in-line:
+
+- i task possono essere chiusi dal bubble della chat
+- i draft outbox possono essere approvati o inviati senza uscire dal thread
+- l’offerta prioritaria e il cliente correlato restano apribili dal messaggio finale
 
 ## Copertura telco reale
 
