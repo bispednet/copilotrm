@@ -3,9 +3,12 @@ import { FooterBar, TopHeader } from './components/Chrome';
 
 type RuntimeLinks = {
   apiBase: string;
+  homeUrl: string;
   assistUrl: string;
   crmUrl: string;
   managerUrl: string;
+  teamUrl: string;
+  adminUrl: string;
   apiStatusUrl: string;
   healthUrl: string;
   infraUrl: string;
@@ -18,9 +21,12 @@ function resolveRuntimeLinks(): RuntimeLinks {
   if (typeof window === 'undefined') {
     return {
       apiBase: env.VITE_API_BASE_URL?.trim() || 'http://localhost:4010',
+      homeUrl: 'http://localhost:43100',
       assistUrl: 'http://localhost:5174',
       crmUrl: 'http://localhost:5173',
       managerUrl: 'http://localhost:5175',
+      teamUrl: 'http://localhost:5175#team',
+      adminUrl: 'http://localhost:5175#admin',
       apiStatusUrl: 'http://localhost:4010/api/system/infra',
       healthUrl: 'http://localhost:4010/health',
       infraUrl: 'http://localhost:4010/api/system/infra',
@@ -33,9 +39,12 @@ function resolveRuntimeLinks(): RuntimeLinks {
     const apiOrigin = `${protocol}//api.eeess.cyou`;
     return {
       apiBase: env.VITE_API_BASE_URL?.trim() || apiOrigin,
+      homeUrl: `${protocol}//www.eeess.cyou`,
       assistUrl: `${protocol}//app.eeess.cyou`,
       crmUrl: `${protocol}//crm.eeess.cyou`,
       managerUrl: `${protocol}//manager.eeess.cyou`,
+      teamUrl: `${protocol}//manager.eeess.cyou#team`,
+      adminUrl: `${protocol}//manager.eeess.cyou#admin`,
       apiStatusUrl: `${apiOrigin}/api/system/infra`,
       healthUrl: `${apiOrigin}/health`,
       infraUrl: `${apiOrigin}/api/system/infra`,
@@ -47,9 +56,12 @@ function resolveRuntimeLinks(): RuntimeLinks {
   const apiOrigin = env.VITE_API_BASE_URL?.trim() || `${protocol}//${host}:4010`;
   return {
     apiBase: apiOrigin,
+    homeUrl: `${protocol}//${host}:43100`,
     assistUrl: `${protocol}//${host}:5174`,
     crmUrl: `${protocol}//${host}:5173`,
     managerUrl: `${protocol}//${host}:5175`,
+    teamUrl: `${protocol}//${host}:5175#team`,
+    adminUrl: `${protocol}//${host}:5175#admin`,
     apiStatusUrl: `${apiOrigin}/api/system/infra`,
     healthUrl: `${apiOrigin}/health`,
     infraUrl: `${apiOrigin}/api/system/infra`,
@@ -60,9 +72,10 @@ function resolveRuntimeLinks(): RuntimeLinks {
 const LINKS = resolveRuntimeLinks();
 const API = LINKS.apiBase;
 
-type Role = 'admin' | 'manager' | 'viewer' | 'sales' | 'content' | 'assist';
+type Role = 'admin' | 'manager' | 'viewer' | 'sales' | 'content' | 'assist' | 'customer-care';
 type Page =
   | 'home'
+  | 'team'
   | 'datahub'
   | 'assist'
   | 'crm'
@@ -76,6 +89,28 @@ type Page =
   | 'characters'
   | 'infra'
   | 'ingest';
+
+type AuthUser = {
+  id: string;
+  email: string;
+  fullName: string;
+  role: Role;
+  status: 'active' | 'disabled';
+};
+
+type AuthSession = { token: string; role: Role; user: AuthUser; expiresAt: string };
+type BootstrapStatus = { ok: boolean; hasUsers: boolean; users: number };
+type ControlCenterUser = {
+  id: string;
+  email: string;
+  fullName: string;
+  role: Role | 'customer-care';
+  status: 'active' | 'disabled';
+  preferences?: Record<string, unknown>;
+  lastLoginAt?: string;
+  createdAt: string;
+  updatedAt: string;
+};
 
 type ContentCard = {
   id: string;
@@ -169,6 +204,25 @@ type WorkspaceOverview = {
   todayShifts: Array<{ sourceKey: string; title: string; kind: string; payload: Record<string, string> }>;
   latestSyncRuns: Array<{ id: string; status: string; createdAt: string; finishedAt?: string; error?: string }>;
 };
+type TeamOverview = {
+  summary: {
+    users: number;
+    usersByRole: Record<string, number>;
+    workspaceConfigured: boolean;
+    telegramConfigured: boolean;
+    whatsappConfigured: boolean;
+    googleConfigured: boolean;
+    queueMode: 'inline' | 'redis';
+  };
+  workspace: WorkspaceOverview;
+  channels: {
+    summary: ChannelControlSummary;
+    telemetry: ChannelControlTelemetry;
+    peers: ChannelControlPeer[];
+    telegramGroupIds: string[];
+    whatsappGroupIds: string[];
+  };
+};
 type Character = {
   key: string;
   name: string;
@@ -235,15 +289,70 @@ function classifyOfferFamily(offer: Offer): string {
   return offer.category;
 }
 
+const PAGE_HASHES: Record<Page, string> = {
+  home: '#home',
+  team: '#team',
+  datahub: '#datahub',
+  assist: '#assist',
+  crm: '#crm',
+  campaigns: '#campaigns',
+  swarm: '#swarm',
+  content: '#content',
+  events: '#events',
+  outbox: '#outbox',
+  ceo: '#ceo',
+  admin: '#admin',
+  characters: '#characters',
+  infra: '#infra',
+  ingest: '#ingest',
+};
+
+function pageFromHash(hash: string): Page {
+  const normalized = hash.replace(/^#/, '').trim().toLowerCase();
+  const entry = (Object.entries(PAGE_HASHES) as Array<[Page, string]>).find(([, value]) => value.slice(1) === normalized);
+  return entry?.[0] ?? 'home';
+}
+
 function App() {
-  const [page, setPage] = useState<Page>('home');
-  const [role, setRole] = useState<Role>('admin');
+  const [page, setPage] = useState<Page>(() => {
+    if (typeof window === 'undefined') return 'home';
+    return pageFromHash(window.location.hash);
+  });
+  const [role, setRole] = useState<Role>('viewer');
   const [themeMode, setThemeMode] = useState<'system' | 'light' | 'dark'>(() => {
     const saved = localStorage.getItem('copilotrm_manager_theme');
     return saved === 'light' || saved === 'dark' || saved === 'system' ? saved : 'system';
   });
   const [busy, setBusy] = useState(false);
   const [log, setLog] = useState('');
+  const [authReady, setAuthReady] = useState(false);
+  const [authError, setAuthError] = useState('');
+  const [bootstrapStatus, setBootstrapStatus] = useState<BootstrapStatus | null>(null);
+  const [sessionToken, setSessionToken] = useState<string>(() => localStorage.getItem('copilotrm_session_token') ?? '');
+  const [authUser, setAuthUser] = useState<AuthUser | null>(null);
+  const [loginEmail, setLoginEmail] = useState('');
+  const [loginPassword, setLoginPassword] = useState('');
+  const [setupEmail, setSetupEmail] = useState('');
+  const [setupFullName, setSetupFullName] = useState('');
+  const [setupPassword, setSetupPassword] = useState('');
+  const [setupPasswordConfirm, setSetupPasswordConfirm] = useState('');
+  const [users, setUsers] = useState<ControlCenterUser[]>([]);
+  const [teamOverview, setTeamOverview] = useState<TeamOverview | null>(null);
+  const [teamQueryText, setTeamQueryText] = useState('Chi è di turno oggi e quali meeting abbiamo in agenda?');
+  const [teamQueryResult, setTeamQueryResult] = useState('');
+  const [teamMeetingText, setTeamMeetingText] = useState('Domani alle 10:30 riunione tecnica con team energia e commerciale per 45 minuti.');
+  const [teamMeetingResult, setTeamMeetingResult] = useState('');
+  const [teamBroadcastChannel, setTeamBroadcastChannel] = useState<'all' | 'telegram' | 'whatsapp'>('all');
+  const [teamBroadcastText, setTeamBroadcastText] = useState('Promemoria operativo: verificare agenda, ticket aperti e priorità del pomeriggio.');
+  const [teamBroadcastResult, setTeamBroadcastResult] = useState<Record<string, unknown> | null>(null);
+  const [userForm, setUserForm] = useState({
+    email: '',
+    fullName: '',
+    role: 'manager' as ControlCenterUser['role'],
+    password: '',
+    status: 'active' as ControlCenterUser['status'],
+  });
+  const [userDrafts, setUserDrafts] = useState<Record<string, { role: ControlCenterUser['role']; status: ControlCenterUser['status']; fullName: string; password: string }>>({});
 
   const [customers, setCustomers] = useState<Customer[]>([]);
   const [offers, setOffers] = useState<Offer[]>([]);
@@ -326,14 +435,76 @@ function App() {
     return () => mq.removeEventListener?.('change', onChange);
   }, [themeMode]);
 
+  useEffect(() => {
+    const applyHash = () => setPage(pageFromHash(window.location.hash));
+    applyHash();
+    window.addEventListener('hashchange', applyHash);
+    return () => window.removeEventListener('hashchange', applyHash);
+  }, []);
+
+  useEffect(() => {
+    const targetHash = PAGE_HASHES[page];
+    if (typeof window !== 'undefined' && window.location.hash !== targetHash) {
+      window.history.replaceState(null, '', targetHash);
+    }
+  }, [page]);
+
   async function apiFetch(path: string, init?: RequestInit): Promise<Response> {
     const headers = new Headers(init?.headers ?? undefined);
-    headers.set('x-bisp-role', role);
-    return fetch(`${API}${path}`, { ...init, headers });
+    if (sessionToken) {
+      headers.set('x-bisp-session', sessionToken);
+    } else {
+      headers.set('x-bisp-role', role);
+    }
+    const response = await fetch(`${API}${path}`, { ...init, headers });
+    if (response.status === 401 && sessionToken) {
+      localStorage.removeItem('copilotrm_session_token');
+      setSessionToken('');
+      setAuthUser(null);
+      setRole('viewer');
+    }
+    return response;
+  }
+
+  async function refreshAuthState(): Promise<void> {
+    setAuthReady(false);
+    try {
+      const statusRes = await fetch(`${API}/api/auth/bootstrap-status`);
+      const status = (await statusRes.json()) as BootstrapStatus;
+      setBootstrapStatus(status);
+      if (!sessionToken) {
+        setAuthUser(null);
+        setRole('viewer');
+        return;
+      }
+      const meRes = await fetch(`${API}/api/auth/me`, { headers: { 'x-bisp-session': sessionToken } });
+      if (!meRes.ok) {
+        localStorage.removeItem('copilotrm_session_token');
+        setSessionToken('');
+        setAuthUser(null);
+        setRole('viewer');
+        return;
+      }
+      const payload = await meRes.json();
+      const user = payload?.session?.user as AuthUser | undefined;
+      if (!user) {
+        setAuthUser(null);
+        setRole('viewer');
+        return;
+      }
+      setAuthUser(user);
+      setRole(user.role);
+      setAuthError('');
+    } catch (error) {
+      setAuthError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setAuthReady(true);
+    }
   }
 
   async function refreshAll(): Promise<void> {
-    const [c, o, t, tk, ob, kp, obj, st, ch, inf, ev, cc, ws] = await Promise.all([
+    if (!authUser) return;
+    const [c, o, t, tk, ob, kp, obj, st, ch, inf, ev, cc, ws, us, team] = await Promise.all([
       apiFetch('/api/customers').then((r) => r.json()),
       apiFetch('/api/offers').then((r) => r.json()),
       apiFetch('/api/tasks').then((r) => r.json()),
@@ -347,6 +518,8 @@ function App() {
       apiFetch('/api/admin/env-status').then((r) => r.json()).catch(() => []),
       apiFetch('/api/admin/channel-control').then((r) => r.json()).catch(() => null),
       apiFetch('/api/admin/workspace').then((r) => r.json()).catch(() => null),
+      apiFetch('/api/admin/users').then((r) => r.json()).catch(() => []),
+      apiFetch('/api/team/overview').then((r) => r.json()).catch(() => null),
     ]);
     setCustomers(Array.isArray(c) ? c : []);
     setOffers(Array.isArray(o) ? o : []);
@@ -361,6 +534,8 @@ function App() {
     setEnvStatus(Array.isArray(ev) ? ev : []);
     setChannelControl(cc ?? null);
     setWorkspace(ws ?? null);
+    setUsers(Array.isArray(us) ? us : []);
+    setTeamOverview(team ?? null);
     if (!selectedCharacterKey && Array.isArray(ch) && ch[0]?.key) {
       setSelectedCharacterKey(ch[0].key);
       setCharacterDraft(ch[0]);
@@ -369,8 +544,13 @@ function App() {
   }
 
   useEffect(() => {
-    void refreshAll();
+    void refreshAuthState();
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    if (!authReady || !authUser) return;
+    void refreshAll();
+  }, [authReady, authUser]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     if (!selectedCharacterKey) return;
@@ -379,7 +559,21 @@ function App() {
   }, [selectedCharacterKey, characters]);
 
   useEffect(() => {
-    if (page !== 'events') return;
+    setUserDrafts(
+      users.reduce<Record<string, { role: ControlCenterUser['role']; status: ControlCenterUser['status']; fullName: string; password: string }>>((acc, user) => {
+        acc[user.id] = {
+          role: user.role,
+          status: user.status,
+          fullName: user.fullName,
+          password: '',
+        };
+        return acc;
+      }, {}),
+    );
+  }, [users]);
+
+  useEffect(() => {
+    if (page !== 'events' || !authUser) return;
 
     let mounted = true;
     let source: EventSource | null = null;
@@ -402,7 +596,8 @@ function App() {
       setEventStreamError('');
       const streamUrl = new URL(`${API}/api/events/stream`);
       streamUrl.searchParams.set('type', selectedEventType);
-      streamUrl.searchParams.set('bispRole', role);
+      if (sessionToken) streamUrl.searchParams.set('bispSession', sessionToken);
+      else streamUrl.searchParams.set('bispRole', role);
       source = new EventSource(streamUrl.toString());
 
       source.addEventListener('ready', (evt) => {
@@ -451,7 +646,126 @@ function App() {
       if (fallbackTimer) window.clearInterval(fallbackTimer);
       source?.close();
     };
-  }, [page, selectedEventType, role, selectedEventRunId]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [page, selectedEventType, role, selectedEventRunId, authUser]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  function openPage(next: Page): void {
+    setPage(next);
+  }
+
+  async function submitBootstrap(): Promise<void> {
+    if (setupPassword !== setupPasswordConfirm) throw new Error('Le password non coincidono');
+    const res = await fetch(`${API}/api/auth/bootstrap`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ email: setupEmail, fullName: setupFullName, password: setupPassword }),
+    });
+    const payload = await res.json();
+    if (!res.ok) throw new Error(payload?.error ?? 'Bootstrap failed');
+    const token = String(payload?.session?.token ?? '');
+    if (!token) throw new Error('Missing session token');
+    localStorage.setItem('copilotrm_session_token', token);
+    setSessionToken(token);
+    setAuthUser(payload.user as AuthUser);
+    setRole((payload?.session?.user?.role ?? 'admin') as Role);
+    setAuthError('');
+    setSetupPassword('');
+    setSetupPasswordConfirm('');
+    await refreshAuthState();
+  }
+
+  async function submitLogin(): Promise<void> {
+    const res = await fetch(`${API}/api/auth/login`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ email: loginEmail, password: loginPassword }),
+    });
+    const payload = await res.json();
+    if (!res.ok) throw new Error(payload?.error ?? 'Login failed');
+    const token = String(payload?.session?.token ?? '');
+    if (!token) throw new Error('Missing session token');
+    localStorage.setItem('copilotrm_session_token', token);
+    setSessionToken(token);
+    setAuthUser(payload.user as AuthUser);
+    setRole((payload?.session?.user?.role ?? 'viewer') as Role);
+    setAuthError('');
+    setLoginPassword('');
+    await refreshAuthState();
+  }
+
+  async function logout(): Promise<void> {
+    if (sessionToken) {
+      await fetch(`${API}/api/auth/logout`, { method: 'POST', headers: { 'x-bisp-session': sessionToken } }).catch(() => undefined);
+    }
+    localStorage.removeItem('copilotrm_session_token');
+    setSessionToken('');
+    setAuthUser(null);
+    setRole('viewer');
+    setUsers([]);
+    setTeamOverview(null);
+    setAuthError('');
+  }
+
+  async function createUser(): Promise<void> {
+    const res = await apiFetch('/api/admin/users', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(userForm),
+    });
+    const payload = await res.json();
+    if (!res.ok) throw new Error(payload?.error ?? 'User creation failed');
+    setUserForm({ email: '', fullName: '', role: 'manager', password: '', status: 'active' });
+  }
+
+  async function saveUser(userId: string): Promise<void> {
+    const draft = userDrafts[userId];
+    if (!draft) return;
+    const res = await apiFetch(`/api/admin/users/${encodeURIComponent(userId)}`, {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        fullName: draft.fullName,
+        role: draft.role,
+        status: draft.status,
+        password: draft.password || undefined,
+      }),
+    });
+    const payload = await res.json();
+    if (!res.ok) throw new Error(payload?.error ?? 'User update failed');
+    setUserDrafts((prev) => ({ ...prev, [userId]: { ...prev[userId], password: '' } }));
+  }
+
+  async function runTeamWorkspaceQuery(): Promise<void> {
+    const res = await apiFetch('/api/team/workspace-query', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ text: teamQueryText }),
+    });
+    const payload = await res.json();
+    if (!res.ok) throw new Error(payload?.error ?? 'Workspace query failed');
+    setTeamQueryResult(String(payload?.result?.text ?? ''));
+  }
+
+  async function runTeamMeetingCreate(): Promise<void> {
+    const res = await apiFetch('/api/team/meetings', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ text: teamMeetingText }),
+    });
+    const payload = await res.json();
+    if (!res.ok) throw new Error(payload?.error ?? 'Meeting creation failed');
+    setTeamMeetingResult(String(payload?.result?.text ?? ''));
+  }
+
+  async function runTeamBroadcast(): Promise<void> {
+    const res = await apiFetch('/api/team/broadcast', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ channel: teamBroadcastChannel, text: teamBroadcastText }),
+    });
+    const payload = await res.json();
+    if (!res.ok) throw new Error(payload?.error ?? 'Broadcast failed');
+    setTeamBroadcastResult(payload);
+  }
 
   async function runAction(label: string, fn: () => Promise<void>): Promise<void> {
     setBusy(true);
@@ -504,6 +818,7 @@ function App() {
 
   const nav: Array<{ key: Page; label: string }> = [
     { key: 'home', label: 'Home / KPI' },
+    { key: 'team', label: 'Team Ops' },
     { key: 'datahub', label: 'Data Hub 360' },
     { key: 'assist', label: 'Assist Desk' },
     { key: 'crm', label: 'CRM Consult' },
@@ -514,7 +829,7 @@ function App() {
     { key: 'ingest', label: 'Ingest / Stock' },
     { key: 'outbox', label: 'Outbox / Approvals' },
     { key: 'ceo', label: 'CEO Objectives' },
-    { key: 'admin', label: 'Admin Settings' },
+    { key: 'admin', label: 'Admin Panel' },
     { key: 'characters', label: 'Character Studio' },
     { key: 'infra', label: 'Infra / Queue' },
   ];
@@ -523,6 +838,7 @@ function App() {
     'ingest.public-offers': 'Ingest offerte luce/TLC + RSS',
     'outbound.dispatch.approved': 'Outbound approved',
   };
+  const isAuthenticated = Boolean(authUser);
 
   return (
     <>
@@ -530,6 +846,9 @@ function App() {
       product="CopilotRM"
       area="Manager Control Room"
       links={[
+        { href: LINKS.homeUrl, label: 'Home' },
+        { href: LINKS.teamUrl, label: 'Team' },
+        { href: LINKS.adminUrl, label: 'Admin Panel' },
         { href: LINKS.managerUrl, label: 'Manager' },
         { href: LINKS.crmUrl, label: 'CRM' },
         { href: LINKS.assistUrl, label: 'Assist' },
@@ -541,49 +860,136 @@ function App() {
       <aside className="sidebar card">
         <p className="eyebrow">CopilotRM Control Plane</p>
         <h1>CRM AI Swarm</h1>
-        <label>Ruolo simulato</label>
-        <select value={role} onChange={(e) => setRole(e.target.value as Role)}>
-          <option value="admin">admin</option>
-          <option value="manager">manager</option>
-          <option value="sales">sales</option>
-          <option value="content">content</option>
-          <option value="assist">assist</option>
-          <option value="viewer">viewer</option>
-        </select>
+        <label>Operatore</label>
+        <div className="infoPanel" style={{ marginBottom: 10 }}>
+          {authUser ? (
+            <>
+              <strong style={{ display: 'block', marginBottom: 4 }}>{authUser.fullName}</strong>
+              <span style={{ display: 'block', fontSize: 12 }}>{authUser.email}</span>
+              <span className="muted" style={{ fontSize: 12 }}>{authUser.role}</span>
+            </>
+          ) : (
+            <span style={{ fontSize: 12 }}>Accesso richiesto per usare il control center.</span>
+          )}
+        </div>
         <label>Tema</label>
         <select value={themeMode} onChange={(e) => setThemeMode(e.target.value as 'system' | 'light' | 'dark')}>
           <option value="system">system</option>
           <option value="light">light</option>
           <option value="dark">dark</option>
         </select>
-        <nav className="menu">
-          {nav.map((item) => (
-            <button key={item.key} className={page === item.key ? 'active' : ''} onClick={() => setPage(item.key)}>
-              {item.label}
-            </button>
-          ))}
-        </nav>
+        {isAuthenticated && (
+          <nav className="menu">
+            {nav.map((item) => (
+              <button key={item.key} className={page === item.key ? 'active' : ''} onClick={() => openPage(item.key)}>
+                {item.label}
+              </button>
+            ))}
+          </nav>
+        )}
         <div className="crossNav">
+          <a href={LINKS.homeUrl}>Home</a>
           <a href={LINKS.crmUrl}>CRM</a>
           <a href={LINKS.assistUrl}>Assist</a>
-          <a href={LINKS.managerUrl}>Control</a>
+          <a href={LINKS.teamUrl}>Team</a>
         </div>
-        <button className="ghost" onClick={() => void runAction('refresh', refreshAll)} disabled={busy}>Refresh</button>
+        {isAuthenticated ? (
+          <>
+            <button className="ghost" onClick={() => void runAction('refresh', refreshAll)} disabled={busy}>Refresh</button>
+            <button className="ghost" onClick={() => void runAction('logout', logout)} disabled={busy}>Logout</button>
+          </>
+        ) : (
+          <button className="ghost" onClick={() => void refreshAuthState()} disabled={busy}>Refresh auth</button>
+        )}
         <small className="muted">{log || 'Nessuna azione'}</small>
         <div className="infoPanel" style={{ marginTop: 10 }}>
           <strong style={{ display: 'block', marginBottom: 4 }}>Sala di regia</strong>
           <span style={{ fontSize: 12 }}>
-            Usa <code>admin</code> per configurazione completa, <code>manager</code> per obiettivi/approvazioni e <code>viewer</code> per sola lettura.
+            {authUser
+              ? 'Sessione attiva. Usa Home, Team e Admin Panel come ingressi principali.'
+              : 'Effettua il login admin/manager per sbloccare utenti, sistema, Team operations e controllo completo.'}
           </span>
         </div>
       </aside>
 
       <section className="content">
+        {!authReady ? (
+          <section className="card">
+            <h2>Verifica accesso control center</h2>
+            <p className="lede">Sto verificando bootstrap, sessione e permessi del pannello manager.</p>
+          </section>
+        ) : !isAuthenticated ? (
+          <>
+            <header className="hero">
+              <div>
+                <p className="eyebrow">Control Center Access</p>
+                <h2 style={{ marginBottom: 6 }}>Accedi al pannello operativo</h2>
+                <p className="lede">
+                  Questo ambiente centralizza utenti, canali, agenda condivisa, fogli Google, broadcast al team e impostazioni di sistema.
+                </p>
+              </div>
+              <div className="helper" style={{ maxWidth: 360 }}>
+                <strong>{bootstrapStatus?.hasUsers ? 'Login richiesto' : 'Prima attivazione'}</strong>
+                <p style={{ margin: '6px 0 0' }}>
+                  {bootstrapStatus?.hasUsers
+                    ? 'Inserisci le credenziali di un utente control-center per accedere a Team, Admin Panel e sale operative.'
+                    : 'Non esistono ancora utenti control-center. Crea adesso il primo admin persistito nel database.'}
+                </p>
+              </div>
+            </header>
+
+            <section className="grid twoCols">
+              {bootstrapStatus?.hasUsers ? (
+                <article className="card">
+                  <h2>Login Admin Panel</h2>
+                  <label>Email</label>
+                  <input value={loginEmail} onChange={(e) => setLoginEmail(e.target.value)} placeholder="admin@azienda.it" />
+                  <label>Password</label>
+                  <input type="password" value={loginPassword} onChange={(e) => setLoginPassword(e.target.value)} placeholder="Password" />
+                  <div className="btnRow">
+                    <button onClick={() => void runAction('auth.login', submitLogin)} disabled={busy}>Accedi</button>
+                    <a className="ghost" href={LINKS.homeUrl}>Torna alla home</a>
+                  </div>
+                  {authError && <p className="muted" style={{ color: '#ef4444' }}>{authError}</p>}
+                </article>
+              ) : (
+                <article className="card">
+                  <h2>Bootstrap primo admin</h2>
+                  <label>Nome completo</label>
+                  <input value={setupFullName} onChange={(e) => setSetupFullName(e.target.value)} placeholder="Nome Cognome" />
+                  <label>Email</label>
+                  <input value={setupEmail} onChange={(e) => setSetupEmail(e.target.value)} placeholder="admin@azienda.it" />
+                  <label>Password</label>
+                  <input type="password" value={setupPassword} onChange={(e) => setSetupPassword(e.target.value)} placeholder="Minimo 10 caratteri" />
+                  <label>Conferma password</label>
+                  <input type="password" value={setupPasswordConfirm} onChange={(e) => setSetupPasswordConfirm(e.target.value)} placeholder="Ripeti password" />
+                  <div className="btnRow">
+                    <button onClick={() => void runAction('auth.bootstrap', submitBootstrap)} disabled={busy}>Crea admin</button>
+                    <a className="ghost" href={LINKS.homeUrl}>Torna alla home</a>
+                  </div>
+                  {authError && <p className="muted" style={{ color: '#ef4444' }}>{authError}</p>}
+                </article>
+              )}
+
+              <article className="card">
+                <h2>Control Center incluso</h2>
+                <ul style={{ margin: 0, paddingLeft: 18, display: 'grid', gap: 8 }}>
+                  <li>gestione utenti e ruoli del pannello</li>
+                  <li>Team Hub con WhatsApp, Telegram, Google Calendar e Google Sheets</li>
+                  <li>scheduler, campagne, outbox, KPI e swarm operations</li>
+                  <li>configurazione runtime, integrazioni e telemetria sistema</li>
+                </ul>
+              </article>
+            </section>
+          </>
+        ) : (
+          <>
         <header className="hero">
           <div>
             <p className="eyebrow">Manager Control Room</p>
             <h2 style={{ marginBottom: 6 }}>
               {page === 'home' && 'Panoramica decisionale del sistema'}
+              {page === 'team' && 'Centro operativo del team e delle integrazioni'}
               {page === 'datahub' && 'Base dati clienti/offerte con vista operativa'}
               {page === 'assist' && 'Presidio intake assistenza e handoff'}
               {page === 'crm' && 'Copilot commerciale e proposta guidata'}
@@ -606,6 +1012,7 @@ function App() {
             <strong>Azione prioritaria</strong>
             <p style={{ margin: '6px 0 0' }}>
               {page === 'home' && 'Verifica KPI e ultime run, poi apri Swarm o Outbox per agire.'}
+              {page === 'team' && 'Usa Team per agenda, turni, meeting, broadcast e coordinamento operativo non tecnico.'}
               {page === 'ceo' && 'Inserisci obiettivo e offerte preferite per orientare l’orchestrator.'}
               {page === 'admin' && 'Conferma variabili integrazione e salva solo parametri validati.'}
               {page === 'events' && 'Configura timer e trigger manuali, poi segui il log passo-passo di ogni ciclo.'}
@@ -623,7 +1030,7 @@ function App() {
                 <p className="lede">Monitora KPI, swarm runs attive, task in attesa e accedi rapidamente alle funzioni principali.</p>
               </div>
               <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 12 }}>
-                {([['CEO Objectives', 'ceo'], ['Campagne', 'campaigns'], ['Swarm Studio', 'swarm'], ['Impostazioni', 'admin']] as [string, Page][]).map(([label, key]) => (
+                {([['Team', 'team'], ['Admin Panel', 'admin'], ['CEO Objectives', 'ceo'], ['Campagne', 'campaigns'], ['Swarm Studio', 'swarm']] as [string, Page][]).map(([label, key]) => (
                   <button key={key} className="ghost" style={{ padding: '6px 14px', fontSize: 13 }} onClick={() => setPage(key)}>{label}</button>
                 ))}
               </div>
@@ -669,6 +1076,148 @@ function App() {
                       </div>
                     ))
                 }
+              </article>
+            </section>
+          </>
+        )}
+
+        {page === 'team' && (
+          <>
+            <section className="statsGrid">
+              <article className="card stat"><span>Utenti attivi</span><strong>{teamOverview?.summary.users ?? users.length}</strong></article>
+              <article className="card stat"><span>Workspace</span><strong>{teamOverview?.summary.workspaceConfigured ? 'ready' : 'off'}</strong></article>
+              <article className="card stat"><span>Telegram</span><strong>{teamOverview?.summary.telegramConfigured ? 'on' : 'off'}</strong></article>
+              <article className="card stat"><span>WhatsApp</span><strong>{teamOverview?.summary.whatsappConfigured ? 'on' : 'off'}</strong></article>
+              <article className="card stat"><span>Turni oggi</span><strong>{teamOverview?.workspace.summary.shiftRowsToday ?? workspace?.summary.shiftRowsToday ?? 0}</strong></article>
+              <article className="card stat"><span>Meeting in arrivo</span><strong>{teamOverview?.workspace.summary.upcomingMeetings ?? workspace?.summary.upcomingMeetings ?? 0}</strong></article>
+              <article className="card stat"><span>Peer attivi</span><strong>{teamOverview?.channels.telemetry.peersActive ?? channelControl?.telemetry.peersActive ?? 0}</strong></article>
+              <article className="card stat"><span>Queue mode</span><strong>{teamOverview?.summary.queueMode ?? channelControl?.summary.queueMode ?? '—'}</strong></article>
+            </section>
+
+            <section className="grid twoCols">
+              <article className="card">
+                <h2>Broadcast team</h2>
+                <p className="muted" style={{ fontSize: 13 }}>Invia comunicazioni rapide ai gruppi operativi WhatsApp e Telegram senza passare da menu tecnici.</p>
+                <label>Canale</label>
+                <select value={teamBroadcastChannel} onChange={(e) => setTeamBroadcastChannel(e.target.value as 'all' | 'telegram' | 'whatsapp')}>
+                  <option value="all">Telegram + WhatsApp</option>
+                  <option value="telegram">Solo Telegram</option>
+                  <option value="whatsapp">Solo WhatsApp</option>
+                </select>
+                <label>Messaggio</label>
+                <textarea rows={5} value={teamBroadcastText} onChange={(e) => setTeamBroadcastText(e.target.value)} />
+                <div className="btnRow">
+                  <button onClick={() => void runAction('team.broadcast', runTeamBroadcast)} disabled={busy}>Invia broadcast</button>
+                  <button className="ghost" onClick={() => void runAction('team.sync', async () => { await apiFetch('/api/admin/workspace/sync', { method: 'POST' }); })} disabled={busy}>Sync workspace</button>
+                </div>
+                {teamBroadcastResult && (
+                  <details open style={{ marginTop: 12 }}>
+                    <summary className="muted" style={{ cursor: 'pointer', fontSize: 12 }}>Esito invio</summary>
+                    <pre>{JSON.stringify(teamBroadcastResult, null, 2)}</pre>
+                  </details>
+                )}
+              </article>
+
+              <article className="card">
+                <h2>Workspace copilot</h2>
+                <p className="muted" style={{ fontSize: 13 }}>Fai domande naturali su agenda condivisa, turni, dipendenti, appuntamenti e righe sincronizzate dai fogli.</p>
+                <label>Domanda</label>
+                <textarea rows={5} value={teamQueryText} onChange={(e) => setTeamQueryText(e.target.value)} />
+                <div className="btnRow">
+                  <button onClick={() => void runAction('team.workspace_query', runTeamWorkspaceQuery)} disabled={busy}>Analizza</button>
+                </div>
+                <label style={{ marginTop: 12 }}>Risposta operativa</label>
+                <textarea rows={8} value={teamQueryResult} readOnly placeholder="La risposta del copilot sul workspace comparirà qui." />
+              </article>
+            </section>
+
+            <section className="grid twoCols">
+              <article className="card">
+                <h2>Crea riunione da testo</h2>
+                <p className="muted" style={{ fontSize: 13 }}>Esempio: “Domani alle 10:30 riunione commerciale con mario@azienda.it per 45 minuti”.</p>
+                <label>Richiesta meeting</label>
+                <textarea rows={5} value={teamMeetingText} onChange={(e) => setTeamMeetingText(e.target.value)} />
+                <div className="btnRow">
+                  <button onClick={() => void runAction('team.meeting', runTeamMeetingCreate)} disabled={busy}>Crea meeting</button>
+                </div>
+                <label style={{ marginTop: 12 }}>Esito</label>
+                <textarea rows={7} value={teamMeetingResult} readOnly placeholder="L’esito della creazione meeting comparirà qui." />
+              </article>
+
+              <article className="card">
+                <h2>Gruppi e integrazioni</h2>
+                <div style={{ display: 'grid', gap: 12 }}>
+                  <div>
+                    <strong>Gruppi Telegram</strong>
+                    {teamOverview?.channels.telegramGroupIds?.length ? (
+                      <ul style={{ margin: '8px 0 0', paddingLeft: 18 }}>
+                        {teamOverview.channels.telegramGroupIds.map((id) => <li key={id}>{id}</li>)}
+                      </ul>
+                    ) : <p className="muted">Nessun gruppo Telegram configurato.</p>}
+                  </div>
+                  <div>
+                    <strong>Gruppi WhatsApp</strong>
+                    {teamOverview?.channels.whatsappGroupIds?.length ? (
+                      <ul style={{ margin: '8px 0 0', paddingLeft: 18 }}>
+                        {teamOverview.channels.whatsappGroupIds.map((id) => <li key={id}>{id}</li>)}
+                      </ul>
+                    ) : <p className="muted">Nessun gruppo WhatsApp configurato.</p>}
+                  </div>
+                  <div>
+                    <strong>Ultimo sync workspace</strong>
+                    <p className="muted">{teamOverview?.workspace.summary.lastSyncAt ? new Date(teamOverview.workspace.summary.lastSyncAt).toLocaleString('it-IT') : 'mai eseguito'}</p>
+                  </div>
+                </div>
+              </article>
+            </section>
+
+            <section className="grid twoCols">
+              <article className="card">
+                <h2>Agenda e turni</h2>
+                <div className="grid twoCols" style={{ gridTemplateColumns: '1fr 1fr' }}>
+                  <div>
+                    <h3 style={{ marginTop: 0 }}>Prossimi eventi</h3>
+                    {(teamOverview?.workspace.nextEvents ?? workspace?.nextEvents ?? []).slice(0, 8).map((event) => (
+                      <div key={`${event.sourceKey}:${event.summary}:${event.startsAt ?? ''}`} style={{ padding: '6px 0', borderBottom: '1px solid var(--line)' }}>
+                        <strong>{event.summary}</strong>
+                        <div className="muted" style={{ fontSize: 12 }}>{event.kind} · {event.startsAt ? new Date(event.startsAt).toLocaleString('it-IT') : 'n/d'}</div>
+                      </div>
+                    ))}
+                  </div>
+                  <div>
+                    <h3 style={{ marginTop: 0 }}>Turni di oggi</h3>
+                    {(teamOverview?.workspace.todayShifts ?? workspace?.todayShifts ?? []).slice(0, 8).map((row) => (
+                      <div key={`${row.sourceKey}:${row.title}`} style={{ padding: '6px 0', borderBottom: '1px solid var(--line)' }}>
+                        <strong>{row.title}</strong>
+                        <div className="muted" style={{ fontSize: 12 }}>{Object.entries(row.payload).slice(0, 3).map(([key, value]) => `${key}: ${value}`).join(' · ')}</div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </article>
+
+              <article className="card">
+                <h2>Canali attivi</h2>
+                <p className="muted" style={{ fontSize: 13 }}>Monitor sintetico delle sessioni canale e delle richieste recenti.</p>
+                <div className="grid twoCols" style={{ gridTemplateColumns: '1fr 1fr' }}>
+                  <div>
+                    <h3 style={{ marginTop: 0 }}>Top action</h3>
+                    <ul style={{ margin: 0, paddingLeft: 18 }}>
+                      {(teamOverview?.channels.telemetry.topActions ?? channelControl?.telemetry.topActions ?? []).slice(0, 6).map((row) => (
+                        <li key={row.label}>{row.label} <strong>{row.count}</strong></li>
+                      ))}
+                    </ul>
+                  </div>
+                  <div>
+                    <h3 style={{ marginTop: 0 }}>Peer recenti</h3>
+                    {(teamOverview?.channels.peers ?? channelControl?.peers ?? []).slice(0, 6).map((peer) => (
+                      <div key={`${peer.channel}:${peer.peerId}`} style={{ padding: '6px 0', borderBottom: '1px solid var(--line)', fontSize: 12 }}>
+                        <strong>{peer.profile?.displayName || peer.profile?.groupName || peer.peerId}</strong>
+                        <div className="muted">{peer.channel} · {peer.lastPanel} · {peer.awaitingInputFor ?? 'ready'}</div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
               </article>
             </section>
           </>
@@ -1406,6 +1955,89 @@ function App() {
           return (
           <>
             <section className="card" style={{ marginBottom: 24 }}>
+              <h2>Admin Panel · utenti e accessi</h2>
+              <p className="muted" style={{ fontSize: 13, marginBottom: 16 }}>Gestisci chi puo accedere al control center, con ruolo, stato e credenziali separate dai canali operativi.</p>
+              <div style={{ display: 'grid', gridTemplateColumns: '1.2fr 1.8fr', gap: 16 }}>
+                <article className="card">
+                  <h3 style={{ marginTop: 0 }}>Nuovo utente</h3>
+                  <label>Nome completo</label>
+                  <input value={userForm.fullName} onChange={(e) => setUserForm((prev) => ({ ...prev, fullName: e.target.value }))} placeholder="Nome Cognome" />
+                  <label>Email</label>
+                  <input value={userForm.email} onChange={(e) => setUserForm((prev) => ({ ...prev, email: e.target.value }))} placeholder="utente@azienda.it" />
+                  <label>Ruolo</label>
+                  <select value={userForm.role} onChange={(e) => setUserForm((prev) => ({ ...prev, role: e.target.value as ControlCenterUser['role'] }))}>
+                    <option value="admin">admin</option>
+                    <option value="manager">manager</option>
+                    <option value="assist">assist</option>
+                    <option value="sales">sales</option>
+                    <option value="content">content</option>
+                    <option value="viewer">viewer</option>
+                    <option value="customer-care">customer-care</option>
+                  </select>
+                  <label>Status</label>
+                  <select value={userForm.status} onChange={(e) => setUserForm((prev) => ({ ...prev, status: e.target.value as ControlCenterUser['status'] }))}>
+                    <option value="active">active</option>
+                    <option value="disabled">disabled</option>
+                  </select>
+                  <label>Password iniziale</label>
+                  <input type="password" value={userForm.password} onChange={(e) => setUserForm((prev) => ({ ...prev, password: e.target.value }))} placeholder="Minimo 10 caratteri" />
+                  <div className="btnRow">
+                    <button onClick={() => void runAction('admin.create_user', createUser)} disabled={busy}>Crea utente</button>
+                  </div>
+                </article>
+                <article className="card">
+                  <h3 style={{ marginTop: 0 }}>Utenti registrati</h3>
+                  {users.length === 0 ? (
+                    <p className="muted">Nessun utente registrato nel control center.</p>
+                  ) : (
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+                      {users.map((user) => {
+                        const draft = userDrafts[user.id];
+                        if (!draft) return null;
+                        return (
+                          <div key={user.id} style={{ border: '1px solid var(--line)', borderRadius: 10, padding: 12 }}>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, alignItems: 'center', marginBottom: 8 }}>
+                              <strong>{user.email}</strong>
+                              <span className="muted" style={{ fontSize: 12 }}>Last login: {user.lastLoginAt ? new Date(user.lastLoginAt).toLocaleString('it-IT') : 'never'}</span>
+                            </div>
+                            <label>Nome completo</label>
+                            <input value={draft.fullName} onChange={(e) => setUserDrafts((prev) => ({ ...prev, [user.id]: { ...prev[user.id], fullName: e.target.value } }))} />
+                            <div className="grid twoCols" style={{ marginTop: 8 }}>
+                              <div>
+                                <label>Ruolo</label>
+                                <select value={draft.role} onChange={(e) => setUserDrafts((prev) => ({ ...prev, [user.id]: { ...prev[user.id], role: e.target.value as ControlCenterUser['role'] } }))}>
+                                  <option value="admin">admin</option>
+                                  <option value="manager">manager</option>
+                                  <option value="assist">assist</option>
+                                  <option value="sales">sales</option>
+                                  <option value="content">content</option>
+                                  <option value="viewer">viewer</option>
+                                  <option value="customer-care">customer-care</option>
+                                </select>
+                              </div>
+                              <div>
+                                <label>Status</label>
+                                <select value={draft.status} onChange={(e) => setUserDrafts((prev) => ({ ...prev, [user.id]: { ...prev[user.id], status: e.target.value as ControlCenterUser['status'] } }))}>
+                                  <option value="active">active</option>
+                                  <option value="disabled">disabled</option>
+                                </select>
+                              </div>
+                            </div>
+                            <label style={{ marginTop: 8 }}>Nuova password (opzionale)</label>
+                            <input type="password" value={draft.password} onChange={(e) => setUserDrafts((prev) => ({ ...prev, [user.id]: { ...prev[user.id], password: e.target.value } }))} placeholder="Lascia vuoto per non cambiarla" />
+                            <div className="btnRow">
+                              <button className="ghost" onClick={() => void runAction(`admin.save_user.${user.id}`, () => saveUser(user.id))} disabled={busy}>Salva</button>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </article>
+              </div>
+            </section>
+
+            <section className="card" style={{ marginBottom: 24 }}>
               <h2>Stato Integrazioni</h2>
               <p className="muted" style={{ fontSize: 13, marginBottom: 16 }}>Verifiche basate sulla presenza delle variabili d'ambiente. I valori non vengono mai esposti.</p>
               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(200px, 1fr))', gap: 12 }}>
@@ -1824,11 +2456,16 @@ function App() {
             </article>
           </section>
         )}
+          </>
+        )}
       </section>
     </main>
     <FooterBar
       text="CopilotRM Manager · obiettivi, approvazioni e stato orchestrazione in un’unica sala di regia."
       links={[
+        { href: LINKS.homeUrl, label: 'Home' },
+        { href: LINKS.teamUrl, label: 'Team' },
+        { href: LINKS.adminUrl, label: 'Admin Panel' },
         { href: LINKS.healthUrl, label: 'Health', external: true },
         { href: LINKS.infraUrl, label: 'Infra', external: true },
       ]}

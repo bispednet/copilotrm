@@ -3,9 +3,12 @@ import { FooterBar, TopHeader } from './components/Chrome';
 
 type RuntimeLinks = {
   apiBase: string;
+  homeUrl: string;
   assistUrl: string;
   crmUrl: string;
   managerUrl: string;
+  teamUrl: string;
+  adminUrl: string;
   apiStatusUrl: string;
   healthUrl: string;
   offersUrl: string;
@@ -18,9 +21,12 @@ function resolveRuntimeLinks(): RuntimeLinks {
   if (typeof window === 'undefined') {
     return {
       apiBase: env.VITE_API_BASE_URL?.trim() || 'http://localhost:4010',
+      homeUrl: 'http://localhost:43100',
       assistUrl: 'http://localhost:5174',
       crmUrl: 'http://localhost:5173',
       managerUrl: 'http://localhost:5175',
+      teamUrl: 'http://localhost:5175#team',
+      adminUrl: 'http://localhost:5175#admin',
       apiStatusUrl: 'http://localhost:4010/api/system/infra',
       healthUrl: 'http://localhost:4010/health',
       offersUrl: 'http://localhost:4010/api/offers',
@@ -33,9 +39,12 @@ function resolveRuntimeLinks(): RuntimeLinks {
     const apiOrigin = `${protocol}//api.eeess.cyou`;
     return {
       apiBase: env.VITE_API_BASE_URL?.trim() || apiOrigin,
+      homeUrl: `${protocol}//www.eeess.cyou`,
       assistUrl: `${protocol}//app.eeess.cyou`,
       crmUrl: `${protocol}//crm.eeess.cyou`,
       managerUrl: `${protocol}//manager.eeess.cyou`,
+      teamUrl: `${protocol}//manager.eeess.cyou#team`,
+      adminUrl: `${protocol}//manager.eeess.cyou#admin`,
       apiStatusUrl: `${apiOrigin}/api/system/infra`,
       healthUrl: `${apiOrigin}/health`,
       offersUrl: `${apiOrigin}/api/offers`,
@@ -47,9 +56,12 @@ function resolveRuntimeLinks(): RuntimeLinks {
   const apiOrigin = env.VITE_API_BASE_URL?.trim() || `${protocol}//${host}:4010`;
   return {
     apiBase: apiOrigin,
+    homeUrl: `${protocol}//${host}:43100`,
     assistUrl: `${protocol}//${host}:5174`,
     crmUrl: `${protocol}//${host}:5173`,
     managerUrl: `${protocol}//${host}:5175`,
+    teamUrl: `${protocol}//${host}:5175#team`,
+    adminUrl: `${protocol}//${host}:5175#admin`,
     apiStatusUrl: `${apiOrigin}/api/system/infra`,
     healthUrl: `${apiOrigin}/health`,
     offersUrl: `${apiOrigin}/api/offers`,
@@ -374,6 +386,9 @@ function App() {
         product="CopilotRM"
         area="CRM Workspace"
         links={[
+          { href: LINKS.homeUrl, label: 'Home' },
+          { href: LINKS.teamUrl, label: 'Team' },
+          { href: LINKS.adminUrl, label: 'Admin Panel' },
           { href: LINKS.crmUrl, label: 'CRM' },
           { href: LINKS.assistUrl, label: 'Assist' },
           { href: LINKS.managerUrl, label: 'Manager' },
@@ -410,9 +425,10 @@ function App() {
           </select>
 
           <div className="crossNav">
+            <a href={LINKS.homeUrl}>Home</a>
             <a href={LINKS.crmUrl}>CRM</a>
             <a href={LINKS.assistUrl}>Assist</a>
-            <a href={LINKS.managerUrl}>Control</a>
+            <a href={LINKS.teamUrl}>Team</a>
           </div>
 
           <button
@@ -1122,6 +1138,9 @@ function App() {
       <FooterBar
         text="CopilotRM CRM · consult, campagne e thread swarm con orientamento next best action."
         links={[
+          { href: LINKS.homeUrl, label: 'Home' },
+          { href: LINKS.teamUrl, label: 'Team' },
+          { href: LINKS.adminUrl, label: 'Admin Panel' },
           { href: LINKS.healthUrl, label: 'Health', external: true },
           { href: LINKS.offersUrl, label: 'Offers API', external: true },
         ]}
