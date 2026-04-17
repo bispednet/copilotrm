@@ -79,6 +79,7 @@ type Page = 'intake' | 'tickets' | 'chat';
 type LookupResponse = {
   found: boolean;
   customer: { id: string; fullName: string } | null;
+  duplicates?: Array<{ customerId: string; score: number; reason: string }>;
   mode: string;
   rule: string;
 };
@@ -411,17 +412,30 @@ function App() {
         const { value, done } = await reader.read();
         if (done) break;
         buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split('\n');
-        buffer = lines.pop() ?? '';
-        for (const line of lines) {
-          if (!line.startsWith('data: ')) continue;
+        const chunks = buffer.split('\n\n');
+        buffer = chunks.pop() ?? '';
+        for (const chunk of chunks) {
+          const line = chunk.split('\n').find((entry) => entry.startsWith('data: '));
+          if (!line) continue;
           try {
-            const parsed = JSON.parse(line.slice(6)) as { type: string; text?: string };
-            if (parsed.type === 'token' || parsed.type === 'agent_reply') {
+            const parsed = JSON.parse(line.slice(6)) as { type: string; content?: string; synthesis?: string; kind?: string; message?: string };
+            if (parsed.type === 'chunk' && parsed.kind === 'synthesis') {
               setChatHistory((prev) => {
                 const next = [...prev];
                 const a = next[assistantIdx];
-                if (a) next[assistantIdx] = { ...a, content: a.content + (parsed.text ?? '') };
+                if (a) next[assistantIdx] = { ...a, content: parsed.content ?? a.content };
+                return next;
+              });
+            } else if (parsed.type === 'done') {
+              setChatHistory((prev) => {
+                const next = [...prev];
+                if (next[assistantIdx]) next[assistantIdx] = { role: 'assistant', content: parsed.synthesis ?? '' };
+                return next;
+              });
+            } else if (parsed.type === 'error') {
+              setChatHistory((prev) => {
+                const next = [...prev];
+                if (next[assistantIdx]) next[assistantIdx] = { role: 'assistant', content: `Errore: ${parsed.message ?? 'unknown error'}` };
                 return next;
               });
             }
@@ -740,7 +754,12 @@ function App() {
                     </button>
                     {lookup && (
                       <div style={{ marginTop: 10, padding: '10px 12px', borderRadius: 10, background: lookup.found ? 'rgba(31,157,91,.08)' : 'rgba(214,46,46,.06)', border: `1px solid ${lookup.found ? 'rgba(31,157,91,.25)' : 'rgba(214,46,46,.2)'}`, fontSize: 13 }}>
-                        {lookup.found ? <><strong>✅ {lookup.customer?.fullName}</strong> — trovato</> : <>⚠️ Non trovato — cliente provvisorio</>}
+                        {lookup.found ? <><strong>✅ {lookup.customer?.fullName}</strong> — trovato</> : <>⚠️ Nessun match esatto — se salvi il ticket verrà creata anagrafica <strong>needs approval</strong></>}
+                        {!lookup.found && Boolean(lookup.duplicates?.length) && (
+                          <div style={{ marginTop: 6, fontSize: 12, color: 'var(--muted)' }}>
+                            Possibili duplicati: {lookup.duplicates!.slice(0, 3).map((item) => `${item.customerId} (${item.score.toFixed(2)})`).join(' · ')}
+                          </div>
+                        )}
                       </div>
                     )}
                     <label>Tipo dispositivo</label>

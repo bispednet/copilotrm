@@ -1,4 +1,10 @@
-import type { CommunicationDraft, ContentCard, TaskItem } from '@bisp/shared-types';
+import type {
+  CommunicationDraft,
+  ContentCard,
+  CustomerOpportunity,
+  CustomerResolutionCase,
+  TaskItem,
+} from '@bisp/shared-types';
 
 // ─── Conversation persistence ─────────────────────────────────────────────────
 
@@ -217,6 +223,84 @@ export class ContentCardRepository {
     const next = { ...curr, ...patch };
     this.cards.set(id, next);
     return next;
+  }
+}
+
+export class CustomerResolutionRepository {
+  private records = new Map<string, CustomerResolutionCase>();
+
+  add(record: CustomerResolutionCase): CustomerResolutionCase {
+    this.records.set(record.id, record);
+    return record;
+  }
+
+  upsert(record: CustomerResolutionCase): CustomerResolutionCase {
+    this.records.set(record.id, record);
+    return record;
+  }
+
+  list(filters?: {
+    customerId?: string;
+    status?: CustomerResolutionCase['status'];
+    limit?: number;
+  }): CustomerResolutionCase[] {
+    const items = [...this.records.values()]
+      .filter((record) => {
+        if (filters?.customerId && record.customerId !== filters.customerId && record.matchedCustomerId !== filters.customerId) return false;
+        if (filters?.status && record.status !== filters.status) return false;
+        return true;
+      })
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+    return typeof filters?.limit === 'number' ? items.slice(0, filters.limit) : items;
+  }
+
+  getById(id: string): CustomerResolutionCase | undefined {
+    return this.records.get(id);
+  }
+
+  replaceAll(records: CustomerResolutionCase[]): void {
+    this.records.clear();
+    records.forEach((record) => this.records.set(record.id, record));
+  }
+}
+
+export class CustomerOpportunityRepository {
+  private items = new Map<string, CustomerOpportunity>();
+
+  add(item: CustomerOpportunity): CustomerOpportunity {
+    this.items.set(item.id, item);
+    return item;
+  }
+
+  upsert(item: CustomerOpportunity): CustomerOpportunity {
+    this.items.set(item.id, item);
+    return item;
+  }
+
+  list(filters?: {
+    customerId?: string;
+    status?: CustomerOpportunity['status'];
+    source?: CustomerOpportunity['source'];
+    limit?: number;
+  }): CustomerOpportunity[] {
+    const items = [...this.items.values()]
+      .filter((item) => {
+        if (filters?.customerId && item.customerId !== filters.customerId) return false;
+        if (filters?.status && item.status !== filters.status) return false;
+        if (filters?.source && item.source !== filters.source) return false;
+        return true;
+      })
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+    return typeof filters?.limit === 'number' ? items.slice(0, filters.limit) : items;
+  }
+
+  getById(id: string): CustomerOpportunity | undefined {
+    return this.items.get(id);
+  }
+
+  replaceAll(items: CustomerOpportunity[]): void {
+    this.items.clear();
+    items.forEach((item) => this.items.set(item.id, item));
   }
 }
 

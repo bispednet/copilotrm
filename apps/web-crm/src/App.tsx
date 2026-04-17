@@ -75,7 +75,15 @@ const API = LINKS.apiBase;
 // ── Types ────────────────────────────────────────────────────────────────────
 
 type Page = 'home' | 'customers' | 'offers' | 'consult' | 'campaigns' | 'chat';
-type Customer = { id: string; fullName: string; phone?: string; segments: string[]; interests?: string[] };
+type Customer = {
+  id: string;
+  fullName: string;
+  phone?: string;
+  segments: string[];
+  interests?: string[];
+  approvalStatus?: 'approved' | 'needs-approval' | 'rejected';
+  dataCertaintyScore?: number;
+};
 type Offer = {
   id: string;
   title: string;
@@ -191,6 +199,7 @@ function App() {
   // SSE streaming state
   const [streamingThread, setStreamingThread] = useState<SwarmThreadMsg[]>([]);
   const [typingAgent, setTypingAgent] = useState<{ agent: string; agentRole: string } | null>(null);
+  const [typingDraft, setTypingDraft] = useState<SwarmThreadMsg | null>(null);
   const streamingThreadRef = useRef<SwarmThreadMsg[]>([]);
   const chatBoxRef = useRef<HTMLDivElement>(null);
 
@@ -270,7 +279,7 @@ function App() {
     if (chatBoxRef.current) {
       chatBoxRef.current.scrollTop = chatBoxRef.current.scrollHeight;
     }
-  }, [chatHistory, streamingThread, typingAgent]);
+  }, [chatHistory, streamingThread, typingAgent, typingDraft]);
 
   // ── SSE streaming sendChat ───────────────────────────────────────────────────
   const sendChat = useCallback(async () => {
@@ -286,9 +295,11 @@ function App() {
     streamingThreadRef.current = [];
     setStreamingThread([]);
     setTypingAgent(null);
+    setTypingDraft(null);
 
     const clearStreaming = () => {
       setTypingAgent(null);
+      setTypingDraft(null);
       streamingThreadRef.current = [];
       setStreamingThread([]);
     };
@@ -321,9 +332,22 @@ function App() {
 
           if (event.type === 'typing') {
             setTypingAgent({ agent: String(event.agent), agentRole: String(event.agentRole) });
+            setTypingDraft((prev) => prev ? { ...prev, agent: String(event.agent), agentRole: String(event.agentRole) } : prev);
+
+          } else if (event.type === 'chunk') {
+            setTypingAgent({ agent: String(event.agent), agentRole: String(event.agentRole) });
+            setTypingDraft({
+              agent: String(event.agent),
+              agentRole: String(event.agentRole),
+              content: String(event.content ?? ''),
+              kind: String(event.kind ?? 'analysis') as SwarmThreadMsg['kind'],
+              mentions: [],
+              round: Number(event.round ?? 0),
+            });
 
           } else if (event.type === 'message') {
             setTypingAgent(null);
+            setTypingDraft(null);
             const m = event.msg as SwarmThreadMsg;
             streamingThreadRef.current = [...streamingThreadRef.current, m];
             setStreamingThread([...streamingThreadRef.current]);
@@ -517,7 +541,11 @@ function App() {
                   <ul className="stacked">
                     {customers.slice(0, 5).map((c) => (
                       <li key={c.id}>
-                        <span><strong>{c.fullName}</strong> <small className="muted">{c.segments.join(', ')}</small></span>
+                        <span>
+                          <strong>{c.fullName}</strong>{' '}
+                          <small className="muted">{c.segments.join(', ') || 'no-segment'}</small>{' '}
+                          {c.approvalStatus === 'needs-approval' && <small style={{ color: '#f59e0b' }}>needs approval</small>}
+                        </span>
                         <span className="muted" style={{ fontSize: 12 }}>{c.phone ?? '-'}</span>
                       </li>
                     ))}
@@ -534,7 +562,7 @@ function App() {
               <div className="tableWrap">
                 <table>
                   <thead>
-                    <tr><th>ID</th><th>Nome</th><th>Telefono</th><th>Segmenti</th><th>Interessi</th></tr>
+                    <tr><th>ID</th><th>Nome</th><th>Telefono</th><th>Stato</th><th>Segmenti</th><th>Interessi</th></tr>
                   </thead>
                   <tbody>
                     {customers.map((c) => (
@@ -542,6 +570,12 @@ function App() {
                         <td><code>{c.id}</code></td>
                         <td><strong>{c.fullName}</strong></td>
                         <td>{c.phone ?? '—'}</td>
+                        <td>
+                          {c.approvalStatus === 'approved' && '✅ approved'}
+                          {c.approvalStatus === 'needs-approval' && '⚠️ needs approval'}
+                          {c.approvalStatus === 'rejected' && '⛔ rejected'}
+                          {!c.approvalStatus && '—'}
+                        </td>
                         <td>{c.segments.join(', ')}</td>
                         <td className="muted">{c.interests?.join(', ') ?? '—'}</td>
                       </tr>
@@ -1025,7 +1059,7 @@ function App() {
                 })}
 
                 {/* Live streaming thread: appare durante chatBusy, scompare dopo done */}
-                {chatBusy && (streamingThread.length > 0 || typingAgent) && (
+                {chatBusy && (streamingThread.length > 0 || typingAgent || typingDraft) && (
                   <div style={{
                     border: '1px solid var(--border)',
                     borderRadius: 10,
@@ -1064,19 +1098,33 @@ function App() {
                     })}
 
                     {/* Typing indicator: mostra l'agente corrente */}
-                    {typingAgent && (() => {
-                      const col = AGENT_COLORS[typingAgent.agent] ?? DEFAULT_COLOR;
+                    {(typingAgent || typingDraft) && (() => {
+                      const activeAgent = typingDraft?.agent ?? typingAgent?.agent ?? 'CopilotRM';
+                      const activeRole = typingDraft?.agentRole ?? typingAgent?.agentRole ?? 'assistant';
+                      const activeKind = typingDraft?.kind ?? 'analysis';
+                      const col = AGENT_COLORS[activeAgent] ?? DEFAULT_COLOR;
                       return (
-                        <div style={{ background: col.bg, border: `1.5px dashed ${col.border}`, borderRadius: 8, padding: '8px 12px', display: 'flex', alignItems: 'center', gap: 8, opacity: 0.85 }}>
-                          <span style={{ fontSize: 16 }}>{col.icon}</span>
-                          <span style={{ fontWeight: 700, fontSize: 13, color: col.border }}>{typingAgent.agent}</span>
-                          <span style={{ fontSize: 11, color: 'var(--muted)' }}>{typingAgent.agentRole}</span>
-                          <span style={{ marginLeft: 'auto', fontSize: 11, color: 'var(--muted)', fontStyle: 'italic' }}>sta scrivendo…</span>
-                          <span style={{ display: 'inline-flex', gap: 3 }}>
-                            {[0, 1, 2].map((d) => (
-                              <span key={d} style={{ width: 5, height: 5, borderRadius: '50%', background: col.border, animation: `pulse 1.2s ${d * 0.2}s infinite` }} />
-                            ))}
-                          </span>
+                        <div style={{ background: col.bg, border: `1.5px dashed ${col.border}`, borderRadius: 8, padding: '8px 12px', opacity: 0.9 }}>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: typingDraft?.content ? 6 : 0 }}>
+                            <span style={{ fontSize: 16 }}>{col.icon}</span>
+                            <span style={{ fontWeight: 700, fontSize: 13, color: col.border }}>{activeAgent}</span>
+                            <span style={{ fontSize: 11, color: 'var(--muted)' }}>{activeRole}</span>
+                            <span style={{ marginLeft: 'auto', fontSize: 10, background: col.border + '33', color: col.border, borderRadius: 4, padding: '1px 6px', fontWeight: 600 }}>
+                              {KIND_LABEL[activeKind]}
+                            </span>
+                          </div>
+                          {typingDraft?.content ? (
+                            <div style={{ fontSize: 13, lineHeight: 1.5, whiteSpace: 'pre-wrap' }}>{typingDraft.content}</div>
+                          ) : (
+                            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                              <span style={{ fontSize: 11, color: 'var(--muted)', fontStyle: 'italic' }}>sta scrivendo…</span>
+                              <span style={{ display: 'inline-flex', gap: 3 }}>
+                                {[0, 1, 2].map((d) => (
+                                  <span key={d} style={{ width: 5, height: 5, borderRadius: '50%', background: col.border, animation: `pulse 1.2s ${d * 0.2}s infinite` }} />
+                                ))}
+                              </span>
+                            </div>
+                          )}
                         </div>
                       );
                     })()}

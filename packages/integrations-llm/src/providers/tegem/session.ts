@@ -117,7 +117,7 @@ export class GeminiSessionManager {
    * running for the same sessionKey, this call waits in a queue.
    * Ensures serial execution per Gemini tab regardless of async concurrency.
    */
-  async withLock<T>(sessionKey: string, fn: () => Promise<T>): Promise<T> {
+  async acquireLock(sessionKey: string): Promise<() => void> {
     const prev = this.locks.get(sessionKey) ?? Promise.resolve();
     let releaseLock!: () => void;
     const next = new Promise<void>((res) => { releaseLock = res; });
@@ -126,14 +126,23 @@ export class GeminiSessionManager {
     await prev; // wait for any prior request on this session to finish
     // Touch activity timestamp — this session is actively being used
     this.lastActivity.set(sessionKey, Date.now());
-    try {
-      return await fn();
-    } finally {
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
       this.lastActivity.set(sessionKey, Date.now());
       this.store.touch(sessionKey);
       releaseLock();
-      // Clean up if no more waiters
       if (this.locks.get(sessionKey) === next) this.locks.delete(sessionKey);
+    };
+  }
+
+  async withLock<T>(sessionKey: string, fn: () => Promise<T>): Promise<T> {
+    const release = await this.acquireLock(sessionKey);
+    try {
+      return await fn();
+    } finally {
+      release();
     }
   }
 

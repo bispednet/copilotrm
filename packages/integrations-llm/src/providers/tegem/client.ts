@@ -188,5 +188,43 @@ export function createTeGemClient(config: TeGemProviderConfig): LLMClient {
         };
       });
     },
+
+    async *streamChat(messages: LLMMessage[], opts?: LLMOptions): AsyncGenerator<{ content: string }, LLMResponse, void> {
+      const sessionKey = opts?.sessionKey?.trim() || 'shared/default';
+      const sessionLabel = opts?.sessionLabel?.trim() || sessionKey;
+      const prompt = flattenMessages(messages);
+      const release = await runtime.sessionManager.acquireLock(sessionKey);
+      try {
+        const page = await runtime.sessionManager.getOrCreate(runtime.provider.config, sessionKey, sessionLabel);
+        await runtime.provider.ensureReady(page);
+        await runtime.provider.ensureConversationNotFull(page);
+
+        const baseline = await runtime.provider.snapshotConversation(page);
+        await runtime.provider.sendPrompt(page, prompt);
+
+        const stream = runtime.provider.streamResponse(page, baseline);
+        let latest = '';
+        while (true) {
+          const next: IteratorResult<string, { text: string }> = await stream.next();
+          if (next.done) {
+            latest = next.value.text.trim();
+            break;
+          }
+          const chunk = next.value.trim();
+          if (chunk && chunk !== latest) {
+            latest = chunk;
+            yield { content: latest };
+          }
+        }
+
+        return {
+          content: latest,
+          provider: 'tegem',
+          model: opts?.model ?? 'gemini-web',
+        } satisfies LLMResponse;
+      } finally {
+        release();
+      }
+    },
   };
 }

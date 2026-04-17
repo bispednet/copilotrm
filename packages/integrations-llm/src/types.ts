@@ -22,8 +22,16 @@ export interface LLMResponse {
   tokensUsed?: number;
 }
 
+export interface LLMStreamChunk {
+  content: string;
+}
+
 export interface LLMClient {
   chat(messages: LLMMessage[], opts?: LLMOptions): Promise<LLMResponse>;
+  streamChat?(
+    messages: LLMMessage[],
+    opts?: LLMOptions
+  ): AsyncGenerator<LLMStreamChunk, LLMResponse, void>;
   readonly provider: string;
   readonly model: string;
 }

@@ -1,6 +1,15 @@
 import { logger } from '@bisp/shared-logger';
 import { PgRuntime } from '@bisp/shared-db';
-import type { AssistanceTicket, AuditRecord, CustomerProfile, ManagerObjective, ProductOffer, TaskItem } from '@bisp/shared-types';
+import type {
+  AssistanceTicket,
+  AuditRecord,
+  CustomerOpportunity,
+  CustomerProfile,
+  CustomerResolutionCase,
+  ManagerObjective,
+  ProductOffer,
+  TaskItem,
+} from '@bisp/shared-types';
 import type { AdminSettingItem } from './admin/settings';
 import type { CampaignRecord, OutboxItem } from './localRepos';
 
@@ -274,6 +283,79 @@ export class PostgresMirror {
        values ($1,$2,$3,$4,$5::jsonb, now(), now())
        on conflict (id) do update set full_name=excluded.full_name, phone=excluded.phone, email=excluded.email, payload=excluded.payload, updated_at=now()`,
       [customer.id, customer.fullName, customer.phone ?? null, customer.email ?? null, JSON.stringify(customer)]
+    );
+  }
+
+  async saveCustomerResolutionCase(record: CustomerResolutionCase): Promise<void> {
+    if (!(await this.ensureReady()) || !this.db) return;
+    await this.db.pool.query(
+      `insert into customer_resolution_cases (
+         id, customer_id, matched_customer_id, status, input_name, input_phone, input_email,
+         duplicate_candidates, created_by, notes, payload, created_at, updated_at
+       )
+       values ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9,$10,$11::jsonb,$12::timestamptz,$13::timestamptz)
+       on conflict (id) do update
+       set customer_id=excluded.customer_id,
+           matched_customer_id=excluded.matched_customer_id,
+           status=excluded.status,
+           input_name=excluded.input_name,
+           input_phone=excluded.input_phone,
+           input_email=excluded.input_email,
+           duplicate_candidates=excluded.duplicate_candidates,
+           created_by=excluded.created_by,
+           notes=excluded.notes,
+           payload=excluded.payload,
+           updated_at=excluded.updated_at`,
+      [
+        record.id,
+        record.customerId ?? null,
+        record.matchedCustomerId ?? null,
+        record.status,
+        record.inputName ?? null,
+        record.inputPhone ?? null,
+        record.inputEmail ?? null,
+        JSON.stringify(record.duplicateCandidates ?? []),
+        record.createdBy,
+        record.notes ?? null,
+        JSON.stringify(record),
+        record.createdAt,
+        record.updatedAt,
+      ]
+    );
+  }
+
+  async saveCustomerOpportunity(record: CustomerOpportunity): Promise<void> {
+    if (!(await this.ensureReady()) || !this.db) return;
+    await this.db.pool.query(
+      `insert into customer_opportunities (
+         id, customer_id, source, status, title, summary, offer_ids, ticket_id, run_id, payload, created_at, updated_at
+       )
+       values ($1,$2,$3,$4,$5,$6,$7::jsonb,$8,$9,$10::jsonb,$11::timestamptz,$12::timestamptz)
+       on conflict (id) do update
+       set customer_id=excluded.customer_id,
+           source=excluded.source,
+           status=excluded.status,
+           title=excluded.title,
+           summary=excluded.summary,
+           offer_ids=excluded.offer_ids,
+           ticket_id=excluded.ticket_id,
+           run_id=excluded.run_id,
+           payload=excluded.payload,
+           updated_at=excluded.updated_at`,
+      [
+        record.id,
+        record.customerId,
+        record.source,
+        record.status,
+        record.title,
+        record.summary,
+        JSON.stringify(record.offerIds ?? []),
+        record.ticketId ?? null,
+        record.runId ?? null,
+        JSON.stringify(record),
+        record.createdAt,
+        record.updatedAt,
+      ]
     );
   }
 
@@ -767,6 +849,18 @@ export class PostgresMirror {
     if (!(await this.ensureReady()) || !this.db) return [];
     const res = await this.db.pool.query<{ payload: unknown }>('select payload from customers');
     return res.rows.map((r) => safeJson<CustomerProfile>(r.payload)).filter(Boolean) as CustomerProfile[];
+  }
+
+  async loadCustomerResolutionCases(): Promise<CustomerResolutionCase[]> {
+    if (!(await this.ensureReady()) || !this.db) return [];
+    const res = await this.db.pool.query<{ payload: unknown }>('select payload from customer_resolution_cases');
+    return res.rows.map((row) => safeJson<CustomerResolutionCase>(row.payload)).filter(Boolean) as CustomerResolutionCase[];
+  }
+
+  async loadCustomerOpportunities(): Promise<CustomerOpportunity[]> {
+    if (!(await this.ensureReady()) || !this.db) return [];
+    const res = await this.db.pool.query<{ payload: unknown }>('select payload from customer_opportunities');
+    return res.rows.map((row) => safeJson<CustomerOpportunity>(row.payload)).filter(Boolean) as CustomerOpportunity[];
   }
 
   async loadTickets(): Promise<AssistanceTicket[]> {

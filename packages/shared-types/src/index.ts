@@ -29,6 +29,14 @@ export interface ConsentState {
   updatedAt: string;
 }
 
+export type CustomerApprovalStatus = 'approved' | 'needs-approval' | 'rejected';
+
+export interface CustomerDuplicateCandidate {
+  customerId: UUID;
+  score: number;
+  reason: string;
+}
+
 export type InteractionType =
   | 'ticket.opened'
   | 'ticket.closed'
@@ -70,6 +78,56 @@ export interface CustomerProfile {
   commercialSaturationScore: number;
   /** Telegram chat_id per invio diretto (numerico come stringa, es. "123456789") */
   telegramChatId?: string;
+  approvalStatus?: CustomerApprovalStatus;
+  source?: 'assist' | 'crm' | 'inbound' | 'manual' | 'import';
+  dataCertaintyScore?: number;
+  duplicateCandidates?: CustomerDuplicateCandidate[];
+  approvedAt?: string;
+  rejectedAt?: string;
+  lastResolutionAt?: string;
+}
+
+export interface CustomerResolutionCase {
+  id: UUID;
+  customerId?: UUID;
+  status: 'matched-existing' | 'created-needs-approval' | 'approved' | 'rejected';
+  inputName?: string;
+  inputPhone?: string;
+  inputEmail?: string;
+  matchedCustomerId?: UUID;
+  duplicateCandidates: CustomerDuplicateCandidate[];
+  createdBy: string;
+  notes?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface CustomerOpportunity {
+  id: UUID;
+  customerId: UUID;
+  source:
+    | 'consult'
+    | 'assist-outcome'
+    | 'campaign'
+    | 'manual'
+    | 'inbound'
+    | 'workspace';
+  status:
+    | 'open'
+    | 'pending-approval'
+    | 'approved'
+    | 'sent'
+    | 'won'
+    | 'lost'
+    | 'archived';
+  title: string;
+  summary: string;
+  offerIds: UUID[];
+  ticketId?: UUID;
+  runId?: UUID;
+  payload: Record<string, unknown>;
+  createdAt: string;
+  updatedAt: string;
 }
 
 export interface AssistanceTicket {

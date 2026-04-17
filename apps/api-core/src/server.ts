@@ -36,7 +36,9 @@ import type {
   CommunicationDraft,
   ContentCard,
   CustomerInteraction,
+  CustomerOpportunity,
   CustomerProfile,
+  CustomerResolutionCase,
   DomainEvent,
   ManagerObjective,
   ProductOffer,
@@ -48,7 +50,15 @@ import { ROLE_PERMISSIONS, can, type RbacRole } from '@bisp/shared-rbac';
 import { demoCustomers, demoObjectives, demoOffers } from './demoData';
 import { AdminSettingsRepository } from './admin/settings';
 import { CharacterStudioRepository } from './admin/characters';
-import { CampaignRepository, ContentCardRepository, ConversationRepository, OutboxStore, TaskRepository } from './localRepos';
+import {
+  CampaignRepository,
+  ContentCardRepository,
+  ConversationRepository,
+  CustomerOpportunityRepository,
+  CustomerResolutionRepository,
+  OutboxStore,
+  TaskRepository,
+} from './localRepos';
 import type { ChannelDispatchRecord, MediaJobRecord } from './postgresMirror';
 import { PostgresMirror } from './postgresMirror';
 import { QueueGateway } from './queueGateway';
@@ -82,6 +92,8 @@ export interface ApiState {
   conversations: ConversationRepository;
   assistance: AssistanceRepository;
   campaigns: CampaignRepository;
+  customerOpportunities: CustomerOpportunityRepository;
+  customerResolutions: CustomerResolutionRepository;
   customers: CustomerRepository;
   danea: DaneaReadOnlyStub;
   drafts: OutboxStore;
@@ -117,6 +129,8 @@ export function buildState(seed?: { customers?: CustomerProfile[]; offers?: Prod
   const conversations = new ConversationRepository();
   const assistance = new AssistanceRepository();
   const campaigns = new CampaignRepository();
+  const customerOpportunities = new CustomerOpportunityRepository();
+  const customerResolutions = new CustomerResolutionRepository();
   const customers = new CustomerRepository();
   const danea = new DaneaReadOnlyStub();
   const drafts = new OutboxStore();
@@ -168,6 +182,8 @@ export function buildState(seed?: { customers?: CustomerProfile[]; offers?: Prod
     conversations,
     assistance,
     campaigns,
+    customerOpportunities,
+    customerResolutions,
     customers,
     danea,
     drafts,
@@ -259,6 +275,208 @@ function stripText(raw: string): string {
     .replace(/<[^>]+>/g, ' ')
     .replace(/\s+/g, ' ')
     .trim();
+}
+
+function normalizePhoneLookup(value: string | undefined | null): string {
+  if (!value) return '';
+  const trimmed = String(value).trim();
+  const keepPlus = trimmed.startsWith('+');
+  const digits = trimmed.replace(/\D+/g, '');
+  return `${keepPlus ? '+' : ''}${digits}`;
+}
+
+function normalizeNameLookup(value: string | undefined | null): string {
+  if (!value) return '';
+  return stripText(String(value))
+    .normalize('NFD')
+    .replace(/\p{Diacritic}+/gu, '')
+    .toLowerCase();
+}
+
+function tokenizeName(value: string | undefined | null): string[] {
+  return normalizeNameLookup(value)
+    .split(/[^a-z0-9]+/)
+    .map((token) => token.trim())
+    .filter(Boolean);
+}
+
+function buildCustomerReason(score: number, bits: string[]): string {
+  const joined = bits.filter(Boolean).join(', ');
+  return joined ? `${score.toFixed(2)} · ${joined}` : score.toFixed(2);
+}
+
+function nowIso(): string {
+  return new Date().toISOString();
+}
+
+function buildCustomerResolution(
+  state: ApiState,
+  input: {
+    fullName?: string;
+    phone?: string;
+    email?: string;
+    source: CustomerProfile['source'];
+    createdBy: string;
+    notes?: string;
+    dataCertaintyScore?: number;
+  }
+): {
+  customer: CustomerProfile;
+  created: boolean;
+  exact: boolean;
+  duplicates: CustomerProfile['duplicateCandidates'];
+  resolution: CustomerResolutionCase;
+} {
+  const phone = normalizePhoneLookup(input.phone);
+  const email = input.email?.trim().toLowerCase() || undefined;
+  const fullName = stripText(input.fullName ?? '');
+  const fullNameNorm = normalizeNameLookup(fullName);
+  const fullNameTokens = tokenizeName(fullName);
+
+  const ranked = state.customers.list().map((candidate) => {
+    let score = 0;
+    const reasons: string[] = [];
+    const candidatePhone = normalizePhoneLookup(candidate.phone);
+    const candidateEmail = candidate.email?.trim().toLowerCase();
+    const candidateNameNorm = normalizeNameLookup(candidate.fullName);
+    const candidateTokens = tokenizeName(candidate.fullName);
+
+    if (phone && candidatePhone && phone === candidatePhone) {
+      score += 1;
+      reasons.push('same-phone');
+    }
+    if (email && candidateEmail && email === candidateEmail) {
+      score += 1;
+      reasons.push('same-email');
+    }
+    if (fullNameNorm && candidateNameNorm && fullNameNorm === candidateNameNorm) {
+      score += 0.92;
+      reasons.push('same-name');
+    } else if (fullNameTokens.length > 0 && candidateTokens.length > 0) {
+      const overlap = fullNameTokens.filter((token) => candidateTokens.includes(token));
+      if (overlap.length > 0) {
+        const tokenScore = overlap.length / Math.max(fullNameTokens.length, candidateTokens.length);
+        score += tokenScore * 0.85;
+        reasons.push(`name-overlap:${overlap.join('|')}`);
+      }
+    }
+
+    if (phone && candidatePhone && phone.endsWith(candidatePhone.replace(/^\+/, ''))) {
+      score += 0.08;
+      reasons.push('phone-suffix');
+    }
+
+    return { candidate, score: Number(score.toFixed(3)), reason: buildCustomerReason(score, reasons) };
+  })
+    .filter((entry) => entry.score >= 0.45)
+    .sort((a, b) => b.score - a.score);
+
+  const exact = ranked[0]?.score != null && ranked[0].score >= 0.99;
+  const duplicates = ranked.slice(0, 5).map((entry) => ({
+    customerId: entry.candidate.id,
+    score: entry.score,
+    reason: entry.reason,
+  }));
+
+  if (exact && ranked[0]) {
+    const existing = ranked[0].candidate;
+    const resolution: CustomerResolutionCase = {
+      id: makeId('custres'),
+      customerId: existing.id,
+      matchedCustomerId: existing.id,
+      status: 'matched-existing',
+      inputName: fullName || undefined,
+      inputPhone: phone || undefined,
+      inputEmail: email,
+      duplicateCandidates: duplicates,
+      createdBy: input.createdBy,
+      notes: input.notes,
+      createdAt: nowIso(),
+      updatedAt: nowIso(),
+    };
+    return { customer: existing, created: false, exact: true, duplicates, resolution };
+  }
+
+  const customer: CustomerProfile = {
+    id: makeId('cust'),
+    fullName: fullName || phone || email || 'Cliente da validare',
+    phone: phone || undefined,
+    email,
+    segments: [],
+    interests: [],
+    purchaseHistory: [],
+    assistanceHistory: [],
+    conversationNotes: input.notes ? [input.notes] : [],
+    interactions: [],
+    consents: {
+      whatsapp: Boolean(phone),
+      email: Boolean(email),
+      telegram: false,
+      updatedAt: nowIso(),
+    },
+    commercialSaturationScore: 0,
+    approvalStatus: 'needs-approval',
+    source: input.source,
+    dataCertaintyScore: input.dataCertaintyScore ?? (fullName && (phone || email) ? 0.82 : 0.62),
+    duplicateCandidates: duplicates,
+    lastResolutionAt: nowIso(),
+  };
+  const resolution: CustomerResolutionCase = {
+    id: makeId('custres'),
+    customerId: customer.id,
+    matchedCustomerId: ranked[0]?.candidate.id,
+    status: 'created-needs-approval',
+    inputName: fullName || undefined,
+    inputPhone: phone || undefined,
+    inputEmail: email,
+    duplicateCandidates: duplicates,
+    createdBy: input.createdBy,
+    notes: input.notes,
+    createdAt: nowIso(),
+    updatedAt: nowIso(),
+  };
+  return { customer, created: true, exact: false, duplicates, resolution };
+}
+
+function createCustomerOpportunity(params: {
+  customerId: string;
+  source: CustomerOpportunity['source'];
+  status: CustomerOpportunity['status'];
+  title: string;
+  summary: string;
+  offerIds?: string[];
+  ticketId?: string;
+  runId?: string;
+  payload?: Record<string, unknown>;
+}): CustomerOpportunity {
+  return {
+    id: makeId('opp'),
+    customerId: params.customerId,
+    source: params.source,
+    status: params.status,
+    title: params.title,
+    summary: params.summary,
+    offerIds: params.offerIds ?? [],
+    ticketId: params.ticketId,
+    runId: params.runId,
+    payload: params.payload ?? {},
+    createdAt: nowIso(),
+    updatedAt: nowIso(),
+  };
+}
+
+function extractPhoneFromText(text: string): string | undefined {
+  const match = text.match(/(?:\+?\d[\d\s-]{7,}\d)/);
+  const normalized = normalizePhoneLookup(match?.[0]);
+  return normalized || undefined;
+}
+
+function extractLikelyCustomerName(text: string): string | undefined {
+  const stripped = stripText(text);
+  const explicit = stripped.match(/(?:nuovo cliente|cliente|contatto)[:,]?\s*([A-ZÀ-Ý][A-Za-zÀ-ÿ'’.-]+(?:\s+[A-ZÀ-Ý][A-Za-zÀ-ÿ'’.-]+){1,3})/);
+  if (explicit?.[1]) return explicit[1].trim();
+  const generic = stripped.match(/\b([A-ZÀ-Ý][A-Za-zÀ-ÿ'’.-]+(?:\s+[A-ZÀ-Ý][A-Za-zÀ-ÿ'’.-]+){1,2})\b/);
+  return generic?.[1]?.trim() || undefined;
 }
 
 function formatMoney(value?: number): string | undefined {
@@ -947,6 +1165,7 @@ export interface ChatSwarmMsg {
  * Permette di leggere il profilo persona reale da CharacterStudioRepository.
  */
 const AGENT_CHARACTER_KEY: Record<string, string> = {
+  Anagrafiche:  'anagrafiche',
   Assistenza:   'assistance',
   Commerciale:  'preventivi',
   Hardware:     'hardware',
@@ -968,7 +1187,7 @@ const AGENT_OFFER_CATEGORIES: Record<string, Array<ProductOffer['category']>> = 
 };
 
 /** Agenti che possono essere invocati nella chat swarm */
-const CHAT_AGENTS_LIST = ['Assistenza', 'Commerciale', 'Hardware', 'Telefonia', 'Energia', 'CustomerCare'];
+const CHAT_AGENTS_LIST = ['Anagrafiche', 'Assistenza', 'Commerciale', 'Hardware', 'Telefonia', 'Energia', 'CustomerCare'];
 
 interface LLMClientLike {
   chat(
@@ -981,11 +1200,22 @@ interface LLMClientLike {
       sessionLabel?: string;
     }
   ): Promise<{ content: string; provider: string; model?: string }>;
+  streamChat?(
+    messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }>,
+    opts?: {
+      tier?: 'small' | 'medium' | 'large';
+      maxTokens?: number;
+      temperature?: number;
+      sessionKey?: string;
+      sessionLabel?: string;
+    }
+  ): AsyncGenerator<{ content: string }, { content: string; provider: string; model?: string }, void>;
 }
 
 /** SSE event types emitted by /api/chat */
 export type ChatSSEEvent =
   | { type: 'typing'; agent: string; agentRole: string }
+  | { type: 'chunk'; agent: string; agentRole: string; kind: ChatSwarmMsg['kind']; round: number; content: string }
   | { type: 'message'; msg: ChatSwarmMsg }
   | { type: 'done'; synthesis: string; swarmRunId: string | null; sessionId: string; customer: { id: string; fullName: string; segments: string[] } | null }
   | { type: 'error'; message: string };
@@ -1017,6 +1247,8 @@ function buildAgentDataContext(
   agentName: string,
   customer: CustomerProfile | undefined,
   customerTickets: AssistanceTicket[],
+  customerResolutions: CustomerResolutionCase[],
+  customerOpportunities: CustomerOpportunity[],
   activeOffers: ProductOffer[],
   activeObjectives: ManagerObjective[]
 ): string {
@@ -1025,12 +1257,24 @@ function buildAgentDataContext(
   if (customer) {
     lines.push('=== DATI CLIENTE ===');
     lines.push(`Nome: ${customer.fullName} | ID: ${customer.id}`);
+    if (customer.approvalStatus) lines.push(`Stato anagrafica: ${customer.approvalStatus}`);
     if (customer.segments.length) lines.push(`Segmenti: ${customer.segments.join(', ')}`);
     if (customer.interests.length) lines.push(`Interessi: ${customer.interests.join(', ')}`);
     if (customer.spendBand) lines.push(`Fascia spesa: ${customer.spendBand}`);
     if (customer.purchaseHistory.length) lines.push(`Acquisti: ${customer.purchaseHistory.slice(0, 3).join(' | ')}`);
     if (customer.conversationNotes.length) lines.push(`Note: ${customer.conversationNotes.slice(0, 2).join(' | ')}`);
     lines.push(`Saturazione comm.: ${customer.commercialSaturationScore}/10`);
+  }
+
+  if (customerResolutions.length > 0) {
+    lines.push('\n=== RISOLUZIONE ANAGRAFICA ===');
+    customerResolutions.slice(0, 3).forEach((record) => {
+      lines.push(`- Stato: ${record.status}${record.inputPhone ? ` | telefono ${record.inputPhone}` : ''}${record.inputEmail ? ` | email ${record.inputEmail}` : ''}`);
+      if (record.duplicateCandidates.length > 0) {
+        lines.push(`  Duplicati possibili: ${record.duplicateCandidates.map((candidate) => `${candidate.customerId} (${candidate.score.toFixed(2)})`).join(', ')}`);
+      }
+      if (record.notes) lines.push(`  Note: ${record.notes}`);
+    });
   }
 
   // Ticket assistenza (per Assistenza + tutti gli agenti come contesto)
@@ -1043,10 +1287,29 @@ function buildAgentDataContext(
     });
   }
 
+  if (customerOpportunities.length > 0) {
+    lines.push('\n=== STORICO COMMERCIALE CLIENTE ===');
+    customerOpportunities.slice(0, 5).forEach((opp) => {
+      lines.push(`- [${opp.source}/${opp.status}] ${opp.title}`);
+      lines.push(`  ${opp.summary}`);
+      if (opp.offerIds.length) lines.push(`  OfferIds: ${opp.offerIds.join(', ')}`);
+    });
+  }
+
   // Offerte per agenti commerciali/tecnici
   const offerCats = AGENT_OFFER_CATEGORIES[agentName];
   if (offerCats) {
-    const relevantOffers = activeOffers.filter((o) => offerCats.includes(o.category)).slice(0, 6);
+    const relevantOffers = activeOffers
+      .filter((o) => offerCats.includes(o.category))
+      .map((offer) => {
+        const segmentOverlap = customer ? offer.targetSegments.filter((segment) => customer.segments.includes(segment)).length : 0;
+        const interestBoost = customer && customer.interests.some((interest) => offer.title.toLowerCase().includes(interest.toLowerCase())) ? 1 : 0;
+        const objectiveBoost = activeObjectives.some((objective) => objective.preferredOfferIds.includes(offer.id)) ? 1.5 : 0;
+        return { offer, score: segmentOverlap * 2 + interestBoost + objectiveBoost + (offer.active ? 0.2 : 0) };
+      })
+      .sort((a, b) => b.score - a.score)
+      .map((row) => row.offer)
+      .slice(0, 6);
     if (relevantOffers.length > 0) {
       lines.push('\n=== OFFERTE DISPONIBILI ===');
       relevantOffers.forEach((o) => {
@@ -1057,6 +1320,14 @@ function buildAgentDataContext(
         if (o.targetSegments.length) lines.push(`  Segmenti target: ${o.targetSegments.join(', ')}`);
       });
     }
+  }
+
+  const recentOffers = activeOffers.slice(0, 4);
+  if (recentOffers.length > 0) {
+    lines.push('\n=== OFFERTE ATTIVE DA CONSIDERARE ===');
+    recentOffers.forEach((offer) => {
+      lines.push(`- ${offer.title} [${offer.category}]${offer.targetSegments.length ? ` | target ${offer.targetSegments.join(', ')}` : ''}`);
+    });
   }
 
   // Obiettivi manager (per agenti commerciali)
@@ -1078,6 +1349,37 @@ function extractMentions(text: string): string[] {
   return [...new Set((text.match(/@([A-Za-zÀ-ù]+)/g) ?? []).map((m) => m.slice(1)).filter((a) => CHAT_AGENTS_LIST.includes(a)))];
 }
 
+async function runAgentTurn(params: {
+  llm: LLMClientLike;
+  messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }>;
+  opts: { tier?: 'small' | 'medium' | 'large'; maxTokens?: number; temperature?: number; sessionKey?: string; sessionLabel?: string };
+  agent: string;
+  agentRole: string;
+  kind: ChatSwarmMsg['kind'];
+  round: number;
+  onTyping?: (agent: string, agentRole: string) => void;
+  onChunk?: (agent: string, agentRole: string, kind: ChatSwarmMsg['kind'], round: number, content: string) => void;
+}): Promise<string> {
+  params.onTyping?.(params.agent, params.agentRole);
+  if (params.llm.streamChat) {
+    const stream = params.llm.streamChat(params.messages, params.opts);
+    let latest = '';
+    while (true) {
+      const next = await stream.next();
+      if (next.done) {
+        return next.value.content.trim();
+      }
+      const content = next.value.content.trim();
+      if (content && content !== latest) {
+        latest = content;
+        params.onChunk?.(params.agent, params.agentRole, params.kind, params.round, latest);
+      }
+    }
+  }
+  const response = await params.llm.chat(params.messages, params.opts);
+  return response.content.trim();
+}
+
 /**
  * Orchestrazione chat multi-agente con dati CRM reali e profili Character Studio.
  * Pipeline SEQUENZIALE (ogni agente vede l'output dei precedenti):
@@ -1095,6 +1397,8 @@ async function runChatOrchestration(params: {
   message: string;
   customer: CustomerProfile | undefined;
   customerTickets: AssistanceTicket[];
+  customerResolutions: CustomerResolutionCase[];
+  customerOpportunities: CustomerOpportunity[];
   activeOffers: ProductOffer[];
   activeObjectives: ManagerObjective[];
   characterStudio: CharacterStudioRepository;
@@ -1102,6 +1406,7 @@ async function runChatOrchestration(params: {
   llmSessionNamespace?: string;
   /** Chiamato immediatamente PRIMA che l'agente venga interrogato */
   onTyping?: (agent: string, agentRole: string) => void;
+  onChunk?: (agent: string, agentRole: string, kind: ChatSwarmMsg['kind'], round: number, content: string) => void;
   /** Chiamato immediatamente DOPO che l'agente risponde */
   onMessage?: (msg: ChatSwarmMsg) => void;
 }): Promise<{ thread: ChatSwarmMsg[]; synthesis: string }> {
@@ -1110,12 +1415,15 @@ async function runChatOrchestration(params: {
     message,
     customer,
     customerTickets,
+    customerResolutions,
+    customerOpportunities,
     activeOffers,
     activeObjectives,
     characterStudio,
     conversationHistory,
     llmSessionNamespace = 'frontend',
     onTyping,
+    onChunk,
     onMessage,
   } = params;
   const thread: ChatSwarmMsg[] = [];
@@ -1130,7 +1438,7 @@ async function runChatOrchestration(params: {
     sessionLabel: `${llmSessionNamespace} · ${agentName}`,
   });
 
-  const sharedDataCtx = buildAgentDataContext('Orchestratore', customer, customerTickets, activeOffers, activeObjectives);
+  const sharedDataCtx = buildAgentDataContext('Orchestratore', customer, customerTickets, customerResolutions, customerOpportunities, activeOffers, activeObjectives);
   const agentList = CHAT_AGENTS_LIST.map((n) => {
     const key = AGENT_CHARACTER_KEY[n];
     const p = key ? characterStudio.get(key) : undefined;
@@ -1151,20 +1459,36 @@ async function runChatOrchestration(params: {
   let orchestratorBrief = '';
   let involvedAgents: string[] = [];
 
-  onTyping?.('Orchestratore', orchRole);
   try {
-    const resp = await llm.chat([
-      { role: 'system', content: `${orchPrompt}\n\nAgenti disponibili: ${agentList}.` },
-      { role: 'user', content: `Richiesta operatore: "${message}"${historyCtx}\n\n${sharedDataCtx}` },
-    ], llmOptsFor('Orchestratore', { tier: 'small', maxTokens: 180 }));
-    orchestratorBrief = resp.content.trim();
+    orchestratorBrief = await runAgentTurn({
+      llm,
+      messages: [
+        { role: 'system', content: `${orchPrompt}\n\nAgenti disponibili: ${agentList}.` },
+        { role: 'user', content: `Richiesta operatore: "${message}"${historyCtx}\n\n${sharedDataCtx}` },
+      ],
+      opts: llmOptsFor('Orchestratore', { tier: 'small', maxTokens: 180 }),
+      agent: 'Orchestratore',
+      agentRole: orchRole,
+      kind: 'brief',
+      round: 0,
+      onTyping,
+      onChunk,
+    });
     involvedAgents = extractMentions(orchestratorBrief);
     if (involvedAgents.length === 0) {
-      involvedAgents = customerTickets.length > 0 ? ['Assistenza', 'Commerciale'] : ['Commerciale', 'CustomerCare'];
+      involvedAgents = customerTickets.length > 0 ? ['Anagrafiche', 'Assistenza', 'Commerciale'] : ['Anagrafiche', 'Commerciale', 'CustomerCare'];
     }
   } catch {
-    orchestratorBrief = `@Assistenza @Commerciale — Analizzare la richiesta: "${message}".${customer ? ` Cliente: ${customer.fullName}.` : ''}`;
-    involvedAgents = ['Assistenza', 'Commerciale'];
+    orchestratorBrief = `@Anagrafiche @Assistenza @Commerciale — Analizzare la richiesta: "${message}".${customer ? ` Cliente: ${customer.fullName}.` : ''}`;
+    involvedAgents = ['Anagrafiche', 'Assistenza', 'Commerciale'];
+  }
+
+  const needsIdentityCheck =
+    !customer ||
+    customer.approvalStatus === 'needs-approval' ||
+    /\b(nuovo cliente|cliente nuovo|anagrafica|duplicat|telefono|numero|contatto)\b/i.test(message);
+  if (needsIdentityCheck && !involvedAgents.includes('Anagrafiche')) {
+    involvedAgents = ['Anagrafiche', ...involvedAgents].slice(0, 4);
   }
 
   const orchMsg: ChatSwarmMsg = { agent: 'Orchestratore', agentRole: orchRole, content: orchestratorBrief, kind: 'brief', mentions: involvedAgents, round: 0 };
@@ -1176,19 +1500,27 @@ async function runChatOrchestration(params: {
 
   for (const agentName of involvedAgents) {
     const { prompt: sysPrompt, role: agentRole } = buildAgentSystemPrompt(agentName, characterStudio);
-    const domainData = buildAgentDataContext(agentName, customer, customerTickets, activeOffers, activeObjectives);
+    const domainData = buildAgentDataContext(agentName, customer, customerTickets, customerResolutions, customerOpportunities, activeOffers, activeObjectives);
 
-    onTyping?.(agentName, agentRole);
     let content = `[${agentName} non disponibile]`;
     try {
-      const resp = await llm.chat([
-        {
-          role: 'system',
-          content: `${sysPrompt}\n\nRispondi al brief dell'Orchestratore basandoti sui dati reali (max 80 parole). Sii diretto. Puoi taggare un altro agente con @NomeAgente se necessario.`,
-        },
-        { role: 'user', content: `Brief: ${orchestratorBrief}${threadSummary()}\n\n${domainData}` },
-      ], llmOptsFor(agentName, { tier: 'small', maxTokens: 160 }));
-      content = resp.content.trim();
+      content = await runAgentTurn({
+        llm,
+        messages: [
+          {
+            role: 'system',
+            content: `${sysPrompt}\n\nRispondi al brief dell'Orchestratore basandoti sui dati reali (max 80 parole). Sii diretto. Puoi taggare un altro agente con @NomeAgente se necessario.`,
+          },
+          { role: 'user', content: `Brief: ${orchestratorBrief}${threadSummary()}\n\n${domainData}` },
+        ],
+        opts: llmOptsFor(agentName, { tier: 'small', maxTokens: 160 }),
+        agent: agentName,
+        agentRole,
+        kind: 'analysis',
+        round: 1,
+        onTyping,
+        onChunk,
+      });
     } catch { /* usa fallback */ }
 
     agentResponses[agentName] = content;
@@ -1202,16 +1534,24 @@ async function runChatOrchestration(params: {
   // ── Step 3: Agenti extra taggati — sequenziali ──────────────────────────────
   for (const agentName of [...extraAgentsCalled].slice(0, 2)) {
     const { prompt: sysPrompt, role: agentRole } = buildAgentSystemPrompt(agentName, characterStudio);
-    const domainData = buildAgentDataContext(agentName, customer, customerTickets, activeOffers, activeObjectives);
+    const domainData = buildAgentDataContext(agentName, customer, customerTickets, customerResolutions, customerOpportunities, activeOffers, activeObjectives);
 
-    onTyping?.(agentName, agentRole);
     let content = `[${agentName} non disponibile]`;
     try {
-      const resp = await llm.chat([
-        { role: 'system', content: `${sysPrompt}\n\nSei stato chiamato dai colleghi. Rispondi al punto che ti riguarda (max 70 parole), cita i dati reali.` },
-        { role: 'user', content: `${threadSummary()}\n\n${domainData}` },
-      ], llmOptsFor(agentName, { tier: 'small', maxTokens: 140 }));
-      content = resp.content.trim();
+      content = await runAgentTurn({
+        llm,
+        messages: [
+          { role: 'system', content: `${sysPrompt}\n\nSei stato chiamato dai colleghi. Rispondi al punto che ti riguarda (max 70 parole), cita i dati reali.` },
+          { role: 'user', content: `${threadSummary()}\n\n${domainData}` },
+        ],
+        opts: llmOptsFor(agentName, { tier: 'small', maxTokens: 140 }),
+        agent: agentName,
+        agentRole,
+        kind: 'analysis',
+        round: 1,
+        onTyping,
+        onChunk,
+      });
     } catch { /* usa fallback */ }
 
     agentResponses[agentName] = content;
@@ -1225,13 +1565,21 @@ async function runChatOrchestration(params: {
   let criticContent = '';
   let criticMentions: string[] = [];
 
-  onTyping?.('Critico', criticRole);
   try {
-    const resp = await llm.chat([
-      { role: 'system', content: criticPrompt },
-      { role: 'user', content: `Richiesta: "${message}"\n\n${sharedDataCtx}${threadSummary()}` },
-    ], llmOptsFor('Critico', { tier: 'small', maxTokens: 140 }));
-    criticContent = resp.content.trim();
+    criticContent = await runAgentTurn({
+      llm,
+      messages: [
+        { role: 'system', content: criticPrompt },
+        { role: 'user', content: `Richiesta: "${message}"\n\n${sharedDataCtx}${threadSummary()}` },
+      ],
+      opts: llmOptsFor('Critico', { tier: 'small', maxTokens: 140 }),
+      agent: 'Critico',
+      agentRole: criticRole,
+      kind: 'critique',
+      round: 2,
+      onTyping,
+      onChunk,
+    });
     criticMentions = extractMentions(criticContent);
   } catch {
     criticContent = '[Critico non disponibile]';
@@ -1244,16 +1592,24 @@ async function runChatOrchestration(params: {
   // ── Step 5: Difesa — sequenziale ────────────────────────────────────────────
   for (const agentName of criticMentions.slice(0, 2)) {
     const { prompt: sysPrompt, role: agentRole } = buildAgentSystemPrompt(agentName, characterStudio);
-    const domainData = buildAgentDataContext(agentName, customer, customerTickets, activeOffers, activeObjectives);
+    const domainData = buildAgentDataContext(agentName, customer, customerTickets, customerResolutions, customerOpportunities, activeOffers, activeObjectives);
 
-    onTyping?.(agentName, agentRole);
     let content = `[${agentName} non disponibile]`;
     try {
-      const resp = await llm.chat([
-        { role: 'system', content: `${sysPrompt}\n\nIl Critico ha sfidato la tua proposta. Rispondi con i dati reali (max 60 parole). Sii concreto.` },
-        { role: 'user', content: `Tua proposta: ${agentResponses[agentName] ?? ''}${threadSummary()}\n\n${domainData}` },
-      ], llmOptsFor(agentName, { tier: 'small', maxTokens: 120 }));
-      content = resp.content.trim();
+      content = await runAgentTurn({
+        llm,
+        messages: [
+          { role: 'system', content: `${sysPrompt}\n\nIl Critico ha sfidato la tua proposta. Rispondi con i dati reali (max 60 parole). Sii concreto.` },
+          { role: 'user', content: `Tua proposta: ${agentResponses[agentName] ?? ''}${threadSummary()}\n\n${domainData}` },
+        ],
+        opts: llmOptsFor(agentName, { tier: 'small', maxTokens: 120 }),
+        agent: agentName,
+        agentRole,
+        kind: 'defense',
+        round: 3,
+        onTyping,
+        onChunk,
+      });
     } catch { /* usa fallback */ }
 
     const msg: ChatSwarmMsg = { agent: agentName, agentRole, content, kind: 'defense', mentions: ['Critico'], round: 3 };
@@ -1265,13 +1621,21 @@ async function runChatOrchestration(params: {
   const { prompt: modPrompt, role: modRole } = buildAgentSystemPrompt('Moderatore', characterStudio);
   let synthesis = Object.entries(agentResponses).map(([a, c]) => `${a}: ${c}`).join('\n');
 
-  onTyping?.('Moderatore', modRole);
   try {
-    const resp = await llm.chat([
-      { role: 'system', content: modPrompt },
-      { role: 'user', content: `Richiesta: "${message}"\n\n${sharedDataCtx}${threadSummary()}` },
-    ], llmOptsFor('Moderatore', { tier: 'small', maxTokens: 220 }));
-    synthesis = resp.content.trim();
+    synthesis = await runAgentTurn({
+      llm,
+      messages: [
+        { role: 'system', content: modPrompt },
+        { role: 'user', content: `Richiesta: "${message}"\n\n${sharedDataCtx}${threadSummary()}` },
+      ],
+      opts: llmOptsFor('Moderatore', { tier: 'small', maxTokens: 220 }),
+      agent: 'Moderatore',
+      agentRole: modRole,
+      kind: 'synthesis',
+      round: 4,
+      onTyping,
+      onChunk,
+    });
   } catch { /* usa fallback */ }
 
   // Moderatore NON viene aggiunto al thread (evita duplicazione con la reply bubble)
@@ -1327,8 +1691,43 @@ function persistOperationalOutput(state: ApiState, output: { tasks: TaskItem[]; 
   const outboxItems = output.drafts.map((d) => {
     const item = state.drafts.addDraft(d);
     state.draftsRaw.add(d);
+    if (d.customerId) {
+      const opportunity = createCustomerOpportunity({
+        customerId: d.customerId,
+        source: d.audience === 'one-to-many' ? 'campaign' : 'manual',
+        status: d.needsApproval ? 'pending-approval' : 'approved',
+        title: `Draft ${d.channel} ${d.audience}`,
+        summary: d.body.slice(0, 220),
+        offerIds: d.relatedOfferId ? [d.relatedOfferId] : [],
+        payload: {
+          channel: d.channel,
+          audience: d.audience,
+          reason: d.reason,
+          recipientRef: d.recipientRef ?? null,
+          draft: d,
+        },
+      });
+      state.customerOpportunities.upsert(opportunity);
+      void state.postgresMirror.saveCustomerOpportunity(opportunity);
+    }
     return item;
   });
+  output.tasks
+    .filter((task) => task.customerId)
+    .forEach((task) => {
+      const opportunity = createCustomerOpportunity({
+        customerId: task.customerId!,
+        source: 'manual',
+        status: task.status === 'done' ? 'approved' : 'open',
+        title: task.title,
+        summary: `${task.kind} · assignee ${task.assigneeRole} · priority ${task.priority}`,
+        offerIds: task.offerId ? [task.offerId] : [],
+        ticketId: task.ticketId,
+        payload: task as unknown as Record<string, unknown>,
+      });
+      state.customerOpportunities.upsert(opportunity);
+      void state.postgresMirror.saveCustomerOpportunity(opportunity);
+    });
   output.auditRecords.forEach((r) => state.audit.write(r));
   void state.postgresMirror.saveTasks(output.tasks);
   void state.postgresMirror.saveOutbox(outboxItems);
@@ -1692,7 +2091,7 @@ export function buildServer(state = buildState()) {
       /^(postgres|hybrid)$/i.test(process.env.BISPCRM_PERSISTENCE_MODE ?? 'memory')
     );
     if (shouldAutoLoad) {
-      const [customers, tickets, offers, objectives, tasks, outbox, campaigns, settings] = await Promise.all([
+      const [customers, tickets, offers, objectives, tasks, outbox, campaigns, settings, customerResolutions, customerOpportunities] = await Promise.all([
         state.postgresMirror.loadCustomers(),
         state.postgresMirror.loadTickets(),
         state.postgresMirror.loadOffers(),
@@ -1701,6 +2100,8 @@ export function buildServer(state = buildState()) {
         state.postgresMirror.loadOutbox(),
         state.postgresMirror.loadCampaigns(),
         state.postgresMirror.loadAdminSettings(),
+        state.postgresMirror.loadCustomerResolutionCases(),
+        state.postgresMirror.loadCustomerOpportunities(),
       ]);
       if (customers.length) state.customers.replaceAll(customers);
       if (tickets.length) state.assistance.replaceAll(tickets);
@@ -1710,6 +2111,8 @@ export function buildServer(state = buildState()) {
       if (outbox.length) state.drafts.replaceAll(outbox);
       if (campaigns.length) state.campaigns.replaceAll(campaigns);
       if (settings.length) state.adminSettings.replaceAll(settings);
+      if (customerResolutions.length) state.customerResolutions.replaceAll(customerResolutions);
+      if (customerOpportunities.length) state.customerOpportunities.replaceAll(customerOpportunities);
       state.rag = buildRagStore(state.customers.list(), state.offers.listActive());
       state.audit.write(
         makeAuditRecord('system', 'db.auto_load_runtime', {
@@ -1721,6 +2124,8 @@ export function buildServer(state = buildState()) {
           outbox: outbox.length,
           campaigns: campaigns.length,
           settings: settings.length,
+          customerResolutions: customerResolutions.length,
+          customerOpportunities: customerOpportunities.length,
         })
       );
     }
@@ -1775,6 +2180,8 @@ export function buildServer(state = buildState()) {
     const telemetry = state.channelControl.telemetry();
     const peers = state.channelControl.listPeers().slice(0, 20);
     const teamUsers = await state.postgresMirror.loadControlCenterUsers();
+    const customerResolutions = state.customerResolutions.list();
+    const customerOpportunities = state.customerOpportunities.list();
     const usersByRole = teamUsers.reduce<Record<string, number>>((acc, user) => {
       acc[user.role] = (acc[user.role] ?? 0) + 1;
       return acc;
@@ -1788,6 +2195,8 @@ export function buildServer(state = buildState()) {
         whatsappConfigured: state.channels.whatsapp.configured,
         googleConfigured: state.workspace.configured,
         queueMode: channelSummary.queueMode,
+        customerApprovalsPending: customerResolutions.filter((record) => record.status === 'created-needs-approval').length,
+        openOpportunities: customerOpportunities.filter((record) => record.status === 'open').length,
       },
       workspace,
       channels: {
@@ -1944,11 +2353,110 @@ export function buildServer(state = buildState()) {
 
   app.get('/api/customers', async () => state.customers.list());
 
+  app.post<{
+    Body: {
+      fullName?: string;
+      phone?: string;
+      email?: string;
+      source?: CustomerProfile['source'];
+      notes?: string;
+      createIfMissing?: boolean;
+    };
+  }>('/api/customers/resolve', async (req, reply) => {
+    if (ensurePermission(req, reply, 'customers:lookup') === null) return;
+    const fullName = stripText(req.body?.fullName ?? '');
+    const phone = normalizePhoneLookup(req.body?.phone);
+    const email = req.body?.email?.trim().toLowerCase();
+    if (!fullName && !phone && !email) {
+      return reply.code(400).send({ error: 'At least one of fullName, phone, email is required' });
+    }
+    const result = buildCustomerResolution(state, {
+      fullName,
+      phone,
+      email,
+      source: req.body?.source ?? 'manual',
+      createdBy: resolveRequestUser(req)?.email ?? resolveRequestRole(req),
+      notes: req.body?.notes,
+    });
+    if (result.created && req.body?.createIfMissing !== false) {
+      state.customers.upsert(result.customer);
+      void state.postgresMirror.saveCustomer(result.customer);
+    }
+    state.customerResolutions.upsert(result.resolution);
+    void state.postgresMirror.saveCustomerResolutionCase(result.resolution);
+    state.audit.write(
+      makeAuditRecord('crm-customers', 'customer.resolved', {
+        customerId: result.customer.id,
+        created: result.created,
+        exact: result.exact,
+        duplicateCount: (result.duplicates ?? []).length,
+      })
+    );
+    return {
+      ok: true,
+      created: result.created,
+      exact: result.exact,
+      customer: result.customer,
+      resolution: result.resolution,
+      duplicates: result.duplicates,
+    };
+  });
+
   app.get<{ Params: { id: string } }>('/api/customers/:id/interactions', async (req, reply) => {
     if (ensurePermission(req, reply, 'customers:lookup') === null) return;
     const customer = state.customers.getById(req.params.id);
     if (!customer) return reply.code(404).send({ error: 'Customer not found' });
     return customer.interactions ?? [];
+  });
+
+  app.get<{ Params: { id: string } }>('/api/customers/:id/opportunities', async (req, reply) => {
+    if (ensurePermission(req, reply, 'customers:lookup') === null) return;
+    const customer = state.customers.getById(req.params.id);
+    if (!customer) return reply.code(404).send({ error: 'Customer not found' });
+    return state.customerOpportunities.list({ customerId: customer.id, limit: 100 });
+  });
+
+  app.get<{ Params: { id: string } }>('/api/customers/:id/resolutions', async (req, reply) => {
+    if (ensurePermission(req, reply, 'customers:lookup') === null) return;
+    const customer = state.customers.getById(req.params.id);
+    if (!customer) return reply.code(404).send({ error: 'Customer not found' });
+    return state.customerResolutions.list({ customerId: customer.id, limit: 50 });
+  });
+
+  app.patch<{ Params: { id: string }; Body: { approvalStatus: CustomerProfile['approvalStatus'] } }>('/api/customers/:id/approval', async (req, reply) => {
+    const role = resolveRequestRole(req);
+    if (ensurePermission(req, reply, 'customers:lookup') === null) return;
+    if (!can(role, 'settings:write') && !can(role, 'manager:write')) {
+      return reply.code(403).send({ error: 'Forbidden', role, permission: 'settings:write|manager:write', authMode });
+    }
+    const customer = state.customers.getById(req.params.id);
+    if (!customer) return reply.code(404).send({ error: 'Customer not found' });
+    const approvalStatus =
+      req.body?.approvalStatus === 'approved'
+        ? 'approved'
+        : req.body?.approvalStatus === 'rejected'
+          ? 'rejected'
+          : 'needs-approval';
+    const next: CustomerProfile = {
+      ...customer,
+      approvalStatus,
+      approvedAt: approvalStatus === 'approved' ? nowIso() : customer.approvedAt,
+      rejectedAt: approvalStatus === 'rejected' ? nowIso() : customer.rejectedAt,
+      lastResolutionAt: nowIso(),
+    };
+    state.customers.upsert(next);
+    void state.postgresMirror.saveCustomer(next);
+    const latestResolution = state.customerResolutions.list({ customerId: customer.id, limit: 1 })[0];
+    if (latestResolution) {
+      const patched: CustomerResolutionCase = {
+        ...latestResolution,
+        status: approvalStatus === 'approved' ? 'approved' : approvalStatus === 'rejected' ? 'rejected' : latestResolution.status,
+        updatedAt: nowIso(),
+      };
+      state.customerResolutions.upsert(patched);
+      void state.postgresMirror.saveCustomerResolutionCase(patched);
+    }
+    return { ok: true, customer: next };
   });
 
   app.get('/api/datahub/overview', async () => {
@@ -1957,6 +2465,8 @@ export function buildServer(state = buildState()) {
     const tickets = state.assistance.list();
     const objectives = state.objectives.listAll();
     const outbox = state.drafts.list();
+    const customerResolutions = state.customerResolutions.list();
+    const customerOpportunities = state.customerOpportunities.list();
     const segments = customers.reduce<Record<string, number>>((acc, c) => {
       c.segments.forEach((s) => { acc[s] = (acc[s] ?? 0) + 1; });
       return acc;
@@ -1967,6 +2477,14 @@ export function buildServer(state = buildState()) {
       tickets: { total: tickets.length, open: tickets.filter((t) => t.outcome === 'pending').length },
       objectives: { total: objectives.length, active: objectives.filter((o) => o.active).length },
       outbox: { total: outbox.length, pendingApproval: outbox.filter((o) => o.status === 'pending-approval').length },
+      customerResolution: {
+        total: customerResolutions.length,
+        pendingApproval: customerResolutions.filter((record) => record.status === 'created-needs-approval').length,
+      },
+      opportunities: {
+        total: customerOpportunities.length,
+        open: customerOpportunities.filter((record) => record.status === 'open').length,
+      },
       segments,
     };
   });
@@ -1976,8 +2494,10 @@ export function buildServer(state = buildState()) {
     const tickets = state.assistance.list().filter((t) => t.customerId === customer.id || t.phoneLookup === customer.phone);
     const tasks = state.tasks.list().filter((t) => t.customerId === customer.id);
     const outbox = state.drafts.list().filter((o) => o.draft.customerId === customer.id);
+    const opportunities = state.customerOpportunities.list({ customerId: customer.id, limit: 50 });
+    const resolutions = state.customerResolutions.list({ customerId: customer.id, limit: 20 });
     const ragHints = state.rag.search(`${customer.fullName} ${customer.interests.join(' ')} ${customer.segments.join(' ')}`, 6);
-    return { customer, tickets, tasks, outbox, ragHints };
+    return { customer, tickets, tasks, outbox, opportunities, resolutions, ragHints };
   });
   app.get<{ Querystring: { q: string } }>('/api/datahub/search', async (req, reply) => {
     const q = req.query.q?.trim().toLowerCase();
@@ -2284,6 +2804,8 @@ export function buildServer(state = buildState()) {
     const objectives = state.objectives.listAll();
     const tasks = state.tasks.list();
     const outbox = state.drafts.list();
+    const customerResolutions = state.customerResolutions.list();
+    const customerOpportunities = state.customerOpportunities.list();
     const campaigns = state.campaigns.list();
     const settings = state.adminSettings.list({ masked: false });
     await Promise.all(customers.map((c) => state.postgresMirror.saveCustomer(c)));
@@ -2294,13 +2816,15 @@ export function buildServer(state = buildState()) {
     await Promise.all(outbox.map((o) => state.postgresMirror.saveOutbox([o])));
     await Promise.all(campaigns.map((c) => state.postgresMirror.saveCampaign(c)));
     await Promise.all(settings.map((s) => state.postgresMirror.saveAdminSetting(s)));
+    await Promise.all(customerResolutions.map((record) => state.postgresMirror.saveCustomerResolutionCase(record)));
+    await Promise.all(customerOpportunities.map((record) => state.postgresMirror.saveCustomerOpportunity(record)));
     const counts = await state.postgresMirror.snapshotCounts();
     state.audit.write(makeAuditRecord('system', 'db.sync_runtime', { counts }));
     return { ok: true, counts };
   });
   app.post('/api/system/db/load-runtime', async (req, reply) => {
     if (ensurePermission(req, reply, 'settings:write') === null) return;
-    const [customers, tickets, offers, objectives, tasks, outbox, campaigns, settings] = await Promise.all([
+    const [customers, tickets, offers, objectives, tasks, outbox, campaigns, settings, customerResolutions, customerOpportunities] = await Promise.all([
       state.postgresMirror.loadCustomers(),
       state.postgresMirror.loadTickets(),
       state.postgresMirror.loadOffers(),
@@ -2309,6 +2833,8 @@ export function buildServer(state = buildState()) {
       state.postgresMirror.loadOutbox(),
       state.postgresMirror.loadCampaigns(),
       state.postgresMirror.loadAdminSettings(),
+      state.postgresMirror.loadCustomerResolutionCases(),
+      state.postgresMirror.loadCustomerOpportunities(),
     ]);
     if (customers.length) state.customers.replaceAll(customers);
     if (tickets.length) state.assistance.replaceAll(tickets);
@@ -2318,6 +2844,8 @@ export function buildServer(state = buildState()) {
     if (outbox.length) state.drafts.replaceAll(outbox);
     if (campaigns.length) state.campaigns.replaceAll(campaigns);
     if (settings.length) state.adminSettings.replaceAll(settings);
+    if (customerResolutions.length) state.customerResolutions.replaceAll(customerResolutions);
+    if (customerOpportunities.length) state.customerOpportunities.replaceAll(customerOpportunities);
     state.rag = buildRagStore(state.customers.list(), state.offers.listActive());
     state.audit.write(makeAuditRecord('system', 'db.load_runtime', {
       customers: customers.length,
@@ -2340,6 +2868,8 @@ export function buildServer(state = buildState()) {
         outbox: outbox.length,
         campaigns: campaigns.length,
         settings: settings.length,
+        customerResolutions: customerResolutions.length,
+        customerOpportunities: customerOpportunities.length,
       },
     };
   });
@@ -2705,21 +3235,28 @@ export function buildServer(state = buildState()) {
   });
 
   app.get<{ Querystring: { phone?: string } }>('/api/assist/customers/lookup', async (req, reply) => {
-    const phone = req.query.phone?.trim();
+    const phone = normalizePhoneLookup(req.query.phone);
     if (!phone) return reply.code(400).send({ error: 'phone query param required' });
-    const customer = state.customers.findByPhone(phone);
+    const resolution = buildCustomerResolution(state, {
+      phone,
+      source: 'assist',
+      createdBy: 'assist-desk',
+    });
+    const customer = resolution.exact ? resolution.customer : null;
     state.audit.write(
       makeAuditRecord('assist-desk', 'assist.lookup.phone', {
         phone,
         found: Boolean(customer),
-        customerId: customer?.id,
+        customerId: customer?.id ?? null,
+        duplicateCount: (resolution.duplicates ?? []).length,
       })
     );
     return {
       found: Boolean(customer),
-      customer: customer ?? null,
-      mode: customer ? 'existing-customer' : 'provisional-customer-required',
-      rule: 'No master customer creation from assist desk',
+      customer,
+      duplicates: resolution.duplicates,
+      mode: customer ? 'existing-customer' : 'needs-resolution',
+      rule: customer ? 'Matched existing customer' : 'No exact match yet; create needs-approval customer if ticket is saved',
     };
   });
 
@@ -2752,13 +3289,48 @@ export function buildServer(state = buildState()) {
 
     const matchedCustomer = customerId
       ? state.customers.getById(customerId)
-      : state.customers.findByPhone(phone);
+      : undefined;
+    const resolved = matchedCustomer
+      ? {
+          customer: matchedCustomer,
+          created: false,
+          exact: true,
+          duplicates: matchedCustomer.duplicateCandidates ?? [],
+          resolution: {
+            id: makeId('custres'),
+            customerId: matchedCustomer.id,
+            matchedCustomerId: matchedCustomer.id,
+            status: 'matched-existing',
+            inputName: customerName,
+            inputPhone: normalizePhoneLookup(phone),
+            inputEmail: customerEmail?.trim().toLowerCase(),
+            duplicateCandidates: matchedCustomer.duplicateCandidates ?? [],
+            createdBy: 'assist-desk',
+            notes: 'Resolved via explicit customerId during ticket creation',
+            createdAt: nowIso(),
+            updatedAt: nowIso(),
+          } satisfies CustomerResolutionCase,
+        }
+      : buildCustomerResolution(state, {
+          fullName: customerName,
+          phone,
+          email: customerEmail,
+          source: 'assist',
+          createdBy: 'assist-desk',
+          notes: `Assist intake for ${deviceType}: ${issue}`,
+          dataCertaintyScore: customerName && (phone || customerEmail) ? 0.86 : 0.68,
+        });
+
+    state.customers.upsert(resolved.customer);
+    void state.postgresMirror.saveCustomer(resolved.customer);
+    state.customerResolutions.upsert(resolved.resolution);
+    void state.postgresMirror.saveCustomerResolutionCase(resolved.resolution);
 
     const now = new Date().toISOString();
     const ticket: AssistanceTicket = {
       id: makeId('ticket'),
-      customerId: matchedCustomer?.id,
-      provisionalCustomer: !matchedCustomer,
+      customerId: resolved.customer.id,
+      provisionalCustomer: resolved.customer.approvalStatus !== 'approved',
       phoneLookup: phone,
       deviceType,
       issue,
@@ -2784,17 +3356,21 @@ export function buildServer(state = buildState()) {
         customerId: ticket.customerId ?? null,
         provisionalCustomer: ticket.provisionalCustomer,
         phoneLookup: ticket.phoneLookup,
+        customerCreated: resolved.created,
+        duplicates: resolved.duplicates,
         rule: ticket.provisionalCustomer
-          ? 'Created provisional internal ticket only (no master customer)'
-          : 'Linked to existing customer',
+          ? 'Created or linked customer with needs-approval status'
+          : 'Linked to approved customer',
       })
     );
 
     return reply.code(201).send({
       ticket,
-      customer: matchedCustomer ?? null,
+      customer: resolved.customer,
+      resolution: resolved.resolution,
+      duplicates: resolved.duplicates,
       provisionalCustomerNotice: ticket.provisionalCustomer
-        ? 'Cliente non trovato: creato ticket con cliente provvisorio interno. Nessuna anagrafica master creata.'
+        ? 'Cliente creato o collegato con stato da approvare. Verifica possibili duplicati prima di considerarlo validato.'
         : null,
     });
   });
@@ -3020,6 +3596,8 @@ export function buildServer(state = buildState()) {
     if (ensurePermission(req, reply, 'kpi:read') === null) return;
     const tasks = state.tasks.list();
     const outbox = state.drafts.list();
+    const customerResolutions = state.customerResolutions.list();
+    const customerOpportunities = state.customerOpportunities.list();
     const byChannel = outbox.reduce<Record<string, number>>((acc, item) => {
       acc[item.draft.channel] = (acc[item.draft.channel] ?? 0) + 1;
       return acc;
@@ -3040,6 +3618,15 @@ export function buildServer(state = buildState()) {
         pendingApprovals,
         byStatus: outbox.reduce<Record<string, number>>((acc, o) => ((acc[o.status] = (acc[o.status] ?? 0) + 1), acc), {}),
         byChannel,
+      },
+      customerResolutions: {
+        total: customerResolutions.length,
+        needsApproval: customerResolutions.filter((record) => record.status === 'created-needs-approval').length,
+      },
+      opportunities: {
+        total: customerOpportunities.length,
+        open: customerOpportunities.filter((record) => record.status === 'open').length,
+        pendingApproval: customerOpportunities.filter((record) => record.status === 'pending-approval').length,
       },
       auditRecords: state.audit.list().length,
       swarm: (() => {
@@ -3415,8 +4002,36 @@ export function buildServer(state = buildState()) {
       personaHintsOverride: personaHints,
       llm: state.llm ?? undefined,
     });
+    const opportunity = createCustomerOpportunity({
+      customerId: customer.id,
+      source: 'consult',
+      status: 'open',
+      title: `Proposta commerciale per ${customer.fullName}`,
+      summary: [
+        result.topOffer?.title ? `Top offer: ${result.topOffer.title}` : 'Nessuna top offer determinata',
+        req.body.prompt ? `Prompt: ${req.body.prompt}` : '',
+      ].filter(Boolean).join(' · '),
+      offerIds: result.topOffer?.id ? [result.topOffer.id] : [],
+      payload: {
+        prompt: req.body.prompt ?? null,
+        requestedOfferId: req.body.offerId ?? null,
+        result,
+      },
+    });
+    state.customerOpportunities.upsert(opportunity);
+    void state.postgresMirror.saveCustomerOpportunity(opportunity);
+    state.customers.addInteraction(customer.id, {
+      id: makeId('int'),
+      type: 'handoff.received',
+      channel: 'crm',
+      agentName: 'consult-agent',
+      summary: `Proposta generata: ${result.topOffer?.title ?? 'nessuna top offer'}`,
+      relatedOfferId: result.topOffer?.id,
+      createdAt: nowIso(),
+    });
+    void state.postgresMirror.saveCustomer(state.customers.getById(customer.id) ?? customer);
     state.audit.write(makeAuditRecord('consult-agent', 'consult.proposal.generated', { customerId: customer.id, offerId: req.body.offerId ?? null }));
-    return result;
+    return { ...result, opportunity };
   });
 
   app.get('/api/scenarios', async () => ({
@@ -3474,6 +4089,8 @@ export function buildServer(state = buildState()) {
           relatedTicketId: ticket.id,
           createdAt: new Date().toISOString(),
         });
+        const currentCustomer = state.customers.getById(ticket.customerId);
+        if (currentCustomer) void state.postgresMirror.saveCustomer(currentCustomer);
       }
 
       state.audit.write(
@@ -3519,6 +4136,36 @@ export function buildServer(state = buildState()) {
       const { output, runId } = await state.orchestrator.runSwarm(ctx, state.swarmRuntime);
       persistOperationalOutput(state, output);
       void broadcastSwarmDebug(state, runId, event.type, output.tasks.length, output.drafts.length);
+
+      if (ticket.customerId) {
+        const rankedOffers = output.rankedActions
+          .map((action) => action.offerId)
+          .filter((offerId): offerId is string => Boolean(offerId));
+        const opportunity = createCustomerOpportunity({
+          customerId: ticket.customerId,
+          source: 'assist-outcome',
+          status: 'open',
+          title: `Esito ticket ${ticket.deviceType}`,
+          summary: [
+            `Outcome: ${ticket.outcome ?? 'pending'}`,
+            ticket.diagnosis ? `Diagnosi: ${ticket.diagnosis}` : '',
+            ticket.inferredSignals.length ? `Segnali: ${ticket.inferredSignals.join(', ')}` : '',
+            output.rankedActions[0]?.title ? `Next best action: ${output.rankedActions[0].title}` : '',
+          ].filter(Boolean).join(' · '),
+          offerIds: rankedOffers,
+          ticketId: ticket.id,
+          runId,
+          payload: {
+            diagnosis: ticket.diagnosis,
+            inferredSignals: ticket.inferredSignals,
+            rankedActions: output.rankedActions.slice(0, 5),
+            tasks: output.tasks,
+            drafts: output.drafts,
+          },
+        });
+        state.customerOpportunities.upsert(opportunity);
+        void state.postgresMirror.saveCustomerOpportunity(opportunity);
+      }
 
       return { ticket, orchestrator: output, swarmRunId: runId };
     }
@@ -3730,6 +4377,25 @@ export function buildServer(state = buildState()) {
           if (message.toLowerCase().includes(c.fullName.toLowerCase())) { customer = c; break; }
         }
       }
+      if (!customer) {
+        const inferredPhone = extractPhoneFromText(message);
+        const inferredName = extractLikelyCustomerName(message);
+        if (inferredPhone || inferredName) {
+          const resolution = buildCustomerResolution(state, {
+            fullName: inferredName,
+            phone: inferredPhone,
+            source: 'crm',
+            createdBy: 'chat',
+            notes: `Auto-resolution from chat message: ${message.slice(0, 160)}`,
+            dataCertaintyScore: inferredName && inferredPhone ? 0.84 : inferredPhone ? 0.72 : 0.64,
+          });
+          customer = resolution.customer;
+          state.customers.upsert(customer);
+          void state.postgresMirror.saveCustomer(customer);
+          state.customerResolutions.upsert(resolution.resolution);
+          void state.postgresMirror.saveCustomerResolutionCase(resolution.resolution);
+        }
+      }
 
       // ── Session management ────────────────────────────────────────────────
       const sessionId = incomingSessionId ?? makeId('sess');
@@ -3753,6 +4419,8 @@ export function buildServer(state = buildState()) {
 
       // ── Carica dati CRM reali ─────────────────────────────────────────────
       const customerTickets = customer ? state.assistance.list().filter((t) => t.customerId === customer!.id) : [];
+      const customerResolutions = customer ? state.customerResolutions.list({ customerId: customer.id, limit: 20 }) : [];
+      const customerOpportunities = customer ? state.customerOpportunities.list({ customerId: customer.id, limit: 20 }) : [];
       const activeOffers = state.offers.listActive();
       const activeObjectives = state.objectives.listActive();
 
@@ -3765,6 +4433,8 @@ export function buildServer(state = buildState()) {
         message,
         customer,
         customerTickets,
+        customerResolutions,
+        customerOpportunities,
         activeOffers,
         activeObjectives,
         characterStudio: state.characterStudio,
@@ -3776,6 +4446,7 @@ export function buildServer(state = buildState()) {
               ? 'channel-telegram'
               : 'frontend',
         onTyping: (agent, agentRole) => send({ type: 'typing', agent, agentRole }),
+        onChunk: (agent, agentRole, kind, round, content) => send({ type: 'chunk', agent, agentRole, kind, round, content }),
         onMessage: (msg) => send({ type: 'message', msg }),
       });
       swarmThread = thread;
@@ -3815,6 +4486,7 @@ export function buildServer(state = buildState()) {
           relatedRunId: swarmRunId ?? undefined,
           createdAt: new Date().toISOString(),
         });
+        void state.postgresMirror.saveCustomer(state.customers.getById(customer.id) ?? customer);
       }
 
       send({ type: 'done', synthesis, swarmRunId, sessionId, customer: customerData });

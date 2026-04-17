@@ -130,5 +130,47 @@ export function createLLMClient(cfg: LLMClientConfig): LLMClient {
       }
       throw new Error('Nessun provider LLM configurato');
     },
+
+    async *streamChat(messages: LLMMessage[], opts?: LLMOptions): AsyncGenerator<{ content: string }, LLMResponse, void> {
+      const tier = opts?.tier ?? 'large';
+      const resolvedOpts: LLMOptions = {
+        ...opts,
+        model: opts?.model ?? (effectiveName ? pickModel(effectiveName, cfg, tier) : undefined),
+      };
+
+      if (primary) {
+        const primaryOpts: LLMOptions = {
+          ...opts,
+          model: opts?.model ?? pickModel(primaryName, cfg, tier),
+        };
+        try {
+          if (primary.streamChat) {
+            return yield* primary.streamChat(messages, primaryOpts);
+          }
+          const response = await primary.chat(messages, primaryOpts);
+          yield { content: response.content };
+          return response;
+        } catch (err) {
+          if (fallback && isRetryable(err)) {
+            if (fallback.streamChat) {
+              return yield* fallback.streamChat(messages, resolvedOpts);
+            }
+            const response = await fallback.chat(messages, resolvedOpts);
+            yield { content: response.content };
+            return response;
+          }
+          throw err;
+        }
+      }
+      if (fallback) {
+        if (fallback.streamChat) {
+          return yield* fallback.streamChat(messages, resolvedOpts);
+        }
+        const response = await fallback.chat(messages, resolvedOpts);
+        yield { content: response.content };
+        return response;
+      }
+      throw new Error('Nessun provider LLM configurato');
+    },
   };
 }

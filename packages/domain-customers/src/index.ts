@@ -1,5 +1,13 @@
 import type { CustomerInteraction, CustomerProfile } from '@bisp/shared-types';
 
+function normalizePhone(value: string | undefined): string {
+  if (!value) return '';
+  const trimmed = value.trim();
+  const keepPlus = trimmed.startsWith('+');
+  const digits = trimmed.replace(/\D+/g, '');
+  return `${keepPlus ? '+' : ''}${digits}`;
+}
+
 export class CustomerRepository {
   private customers = new Map<string, CustomerProfile>();
 
@@ -12,7 +20,8 @@ export class CustomerRepository {
   }
 
   findByPhone(phone: string): CustomerProfile | undefined {
-    return [...this.customers.values()].find((c) => c.phone === phone);
+    const needle = normalizePhone(phone);
+    return [...this.customers.values()].find((customer) => normalizePhone(customer.phone) === needle);
   }
 
   list(): CustomerProfile[] {
