@@ -98,6 +98,9 @@ Implemented in this refactor:
 - Google Workspace sync + agenda/shift/meeting operations
 - admin endpoint + manager rendering for channel-control and workspace
 - env/docs updates
+- control-center auth tables and session-aware manager routing
+- Team Hub page with broadcast, workspace Q&A, meeting creation, peer visibility, and synced agenda/shift panels
+- Admin Panel page with DB-backed user lifecycle management
 
 Explicitly deferred:
 

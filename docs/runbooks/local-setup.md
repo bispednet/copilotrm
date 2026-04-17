@@ -14,6 +14,15 @@
 3. `curl http://localhost:4010/health`
 4. `curl -X POST http://localhost:4010/api/scenarios/repairNotWorth/run`
 
+Portal e superfici locali:
+
+- `http://localhost:43100` — home portal
+- `http://localhost:5174` — Assist Desk
+- `http://localhost:5173` — CRM
+- `http://localhost:5175` — Manager / Control Center
+- `http://localhost:5175#team` — Team Hub
+- `http://localhost:5175#admin` — Admin Panel
+
 ## TeGem / Gemini via Playwright
 
 Per usare Gemini tabs al posto di Ollama:
@@ -112,6 +121,63 @@ curl http://localhost:4010/api/admin/rbac
 curl http://localhost:4010/api/admin/channel-control
 curl http://localhost:4010/api/tasks
 curl 'http://localhost:4010/api/outbox?status=pending-approval'
+```
+
+## Control Center auth
+
+Bootstrap primo admin:
+
+```bash
+curl -X POST http://localhost:4010/api/auth/bootstrap \
+  -H 'content-type: application/json' \
+  -d '{"email":"admin@azienda.it","fullName":"Admin Azienda","password":"cambia-subito-questa-password"}'
+```
+
+Login:
+
+```bash
+curl -X POST http://localhost:4010/api/auth/login \
+  -H 'content-type: application/json' \
+  -d '{"email":"admin@azienda.it","password":"cambia-subito-questa-password"}'
+```
+
+Verifica sessione:
+
+```bash
+curl http://localhost:4010/api/auth/me \
+  -H 'x-bisp-session: <TOKEN>'
+```
+
+Lista utenti control center:
+
+```bash
+curl http://localhost:4010/api/admin/users \
+  -H 'x-bisp-session: <TOKEN>'
+```
+
+Team overview:
+
+```bash
+curl http://localhost:4010/api/team/overview \
+  -H 'x-bisp-session: <TOKEN>'
+```
+
+Broadcast team:
+
+```bash
+curl -X POST http://localhost:4010/api/team/broadcast \
+  -H 'content-type: application/json' \
+  -H 'x-bisp-session: <TOKEN>' \
+  -d '{"channel":"all","text":"Promemoria operativo per il team"}'
+```
+
+Meeting da linguaggio naturale:
+
+```bash
+curl -X POST http://localhost:4010/api/team/meetings \
+  -H 'content-type: application/json' \
+  -H 'x-bisp-session: <TOKEN>' \
+  -d '{"text":"Domani alle 10:30 riunione tecnica con mario@azienda.it per 45 minuti"}'
 ```
 
 Approva e invia un draft:

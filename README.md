@@ -2,6 +2,17 @@
 
 Monorepo TypeScript per un AI CRM & Swarm Automation Layer orientato al retail/assistenza tecnica.
 
+## Surface di prodotto
+
+- `https://www.eeess.cyou` — home portal con ingresso alle aree operative
+- `https://app.eeess.cyou` — Assist Desk
+- `https://crm.eeess.cyou` — CRM workspace
+- `https://manager.eeess.cyou` — Manager / control center autenticato
+- `https://manager.eeess.cyou#team` — Team operations hub
+- `https://manager.eeess.cyou#admin` — Admin Panel
+- `https://api.eeess.cyou` — backend/API status
+- `https://vnc.eeess.cyou` — noVNC / Playwright desktop per Gemini
+
 ---
 
 ## Architettura
@@ -135,7 +146,7 @@ Vedere `.env.example` per la lista completa.
 | Valore | Comportamento |
 |---|---|
 | `none` | Nessun controllo (solo dev locale) |
-| `header` | Header `x-bisp-role` richiesto |
+| `header` | Compatibilità RBAC via `x-bisp-role`, ma il control center usa sessioni DB-backed |
 
 ---
 
@@ -143,6 +154,11 @@ Vedere `.env.example` per la lista completa.
 
 ```
 GET  /health
+GET  /api/auth/bootstrap-status
+POST /api/auth/bootstrap
+POST /api/auth/login
+POST /api/auth/logout
+GET  /api/auth/me
 GET  /api/customers
 GET  /api/offers
 GET  /api/objectives
@@ -175,6 +191,9 @@ GET  /api/events/runs
 GET  /api/events/runs/:runId
 GET  /api/events/stream
 GET  /api/admin/settings
+GET  /api/admin/users
+POST /api/admin/users
+PATCH /api/admin/users/:id
 PATCH /api/admin/settings/:key
 GET  /api/admin/agents
 GET  /api/admin/models
@@ -182,6 +201,10 @@ GET  /api/admin/channels
 GET  /api/admin/channel-control
 GET  /api/admin/workspace
 POST /api/admin/workspace/sync
+GET  /api/team/overview
+POST /api/team/workspace-query
+POST /api/team/meetings
+POST /api/team/broadcast
 GET  /api/admin/characters
 POST /api/channels/control/handle
 GET  /api/system/infra
@@ -218,7 +241,9 @@ Se anche il fallback fallisce il sistema usa template string — non crasha mai.
 
 - Tutti i segreti vivono **solo** in `.env` (in `.gitignore`)
 - Il codice sorgente non contiene valori di configurazione, credenziali o dati aziendali
-- `BISPCRM_AUTH_MODE=header` abilita RBAC minimo tramite header `x-bisp-role`
+- Il Manager control center usa utenti e sessioni persistite in Postgres
+- Il primo admin si crea tramite bootstrap, poi l’accesso avviene via login e token `x-bisp-session`
+- `BISPCRM_AUTH_MODE=header` resta come compatibilità per endpoint/worker legacy
 - I token vanno ruotati periodicamente e dopo ogni eventuale esposizione
 
 ---
@@ -254,6 +279,16 @@ Use cases coperti:
 - meeting/inviti Google Calendar
 - fogli operativi da Google Sheets
 - risposte “idiotproof” in gruppo WhatsApp o nelle chat bot
+
+## Control Center
+
+Il manager non è più solo una dashboard di supporto. Ora funge da centro di controllo unico, con:
+
+- `Home / KPI` per priorità e stato operativo
+- `Team Ops` per broadcast, agenda, turni, meeting e osservabilità canali
+- `Admin Panel` per utenti, ruoli, settings, env status, telemetria e runtime
+
+Il piano di finalizzazione prodotto è tracciato in [docs/production-control-center-plan.md](docs/production-control-center-plan.md).
 
 ---
 
