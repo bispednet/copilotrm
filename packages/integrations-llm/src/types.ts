@@ -32,6 +32,7 @@ export interface LLMClient {
     messages: LLMMessage[],
     opts?: LLMOptions
   ): AsyncGenerator<LLMStreamChunk, LLMResponse, void>;
+  prewarmSessions?(sessions: LLMOptions[]): Promise<void>;
   readonly provider: string;
   readonly model: string;
 }

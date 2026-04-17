@@ -158,6 +158,17 @@ export function createTeGemClient(config: TeGemProviderConfig): LLMClient {
     provider: 'tegem',
     model: 'gemini-web',
 
+    async prewarmSessions(sessions: LLMOptions[]): Promise<void> {
+      const unique = sessions
+        .map((session) => ({
+          sessionKey: session.sessionKey?.trim() || '',
+          label: session.sessionLabel?.trim() || session.sessionKey?.trim() || 'shared/default',
+        }))
+        .filter((session) => session.sessionKey);
+      if (unique.length === 0) return;
+      await runtime.sessionManager.prewarm(runtime.provider.config, unique);
+    },
+
     async chat(messages: LLMMessage[], opts?: LLMOptions): Promise<LLMResponse> {
       const sessionKey = opts?.sessionKey?.trim() || 'shared/default';
       const sessionLabel = opts?.sessionLabel?.trim() || sessionKey;

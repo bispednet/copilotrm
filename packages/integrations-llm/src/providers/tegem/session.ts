@@ -162,7 +162,10 @@ export class GeminiSessionManager {
    */
   async getOrCreate(provider: GeminiProviderConfig, sessionKey: string, label?: string): Promise<Page> {
     const existing = this.getPage(sessionKey);
-    if (existing) return existing;
+    if (existing) {
+      this.lastActivity.set(sessionKey, Date.now());
+      return existing;
+    }
 
     const context = await this.ensureContext();
     const page = await context.newPage();
@@ -199,6 +202,29 @@ export class GeminiSessionManager {
     }
 
     return page;
+  }
+
+  async prewarm(provider: GeminiProviderConfig, sessions: Array<{ sessionKey: string; label?: string }>): Promise<void> {
+    const unique = sessions.filter(
+      (session, index, arr) =>
+        session.sessionKey.trim().length > 0 &&
+        arr.findIndex((candidate) => candidate.sessionKey === session.sessionKey) === index,
+    );
+    if (unique.length === 0) return;
+
+    await Promise.all(
+      unique.map(async (session) => {
+        try {
+          await this.withLock(session.sessionKey, async () => {
+            const page = await this.getOrCreate(provider, session.sessionKey, session.label);
+            await page.bringToFront().catch(() => undefined);
+            this.lastActivity.set(session.sessionKey, Date.now());
+          });
+        } catch (error) {
+          console.warn(`[Session] Prewarm failed for ${session.sessionKey}:`, error);
+        }
+      }),
+    );
   }
 
   /**

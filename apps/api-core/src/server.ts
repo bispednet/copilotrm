@@ -1446,6 +1446,13 @@ interface LLMClientLike {
       sessionLabel?: string;
     }
   ): AsyncGenerator<{ content: string }, { content: string; provider: string; model?: string }, void>;
+  prewarmSessions?(sessions: Array<{
+    tier?: 'small' | 'medium' | 'large';
+    maxTokens?: number;
+    temperature?: number;
+    sessionKey?: string;
+    sessionLabel?: string;
+  }>): Promise<void>;
 }
 
 /** SSE event types emitted by /api/chat */
@@ -1703,6 +1710,14 @@ async function runChatOrchestration(params: {
     sessionKey: `${llmSessionNamespace}:${agentName.toLowerCase().replace(/[^a-z0-9]+/g, '-') || 'shared'}`,
     sessionLabel: `${llmSessionNamespace} · ${agentName}`,
   });
+  const prewarmAgents = async (agentNames: string[]): Promise<void> => {
+    if (!llm.prewarmSessions) return;
+    const sessions = agentNames.map((agentName) => llmOptsFor(agentName)).filter((session, index, arr) =>
+      arr.findIndex((candidate) => candidate.sessionKey === session.sessionKey) === index,
+    );
+    if (!sessions.length) return;
+    await llm.prewarmSessions(sessions).catch(() => undefined);
+  };
 
   const sharedDataCtx = buildAgentDataContext(
     'Orchestratore',
@@ -1733,6 +1748,8 @@ async function runChatOrchestration(params: {
   const { prompt: orchPrompt, role: orchRole } = buildAgentSystemPrompt('Orchestratore', characterStudio);
   let orchestratorBrief = '';
   let involvedAgents: string[] = [];
+
+  await prewarmAgents(['Orchestratore']);
 
   try {
     orchestratorBrief = await runAgentTurn({
@@ -1765,6 +1782,8 @@ async function runChatOrchestration(params: {
   if (needsIdentityCheck && !involvedAgents.includes('Anagrafiche')) {
     involvedAgents = ['Anagrafiche', ...involvedAgents].slice(0, 4);
   }
+
+  await prewarmAgents([...involvedAgents, 'Critico', 'Moderatore']);
 
   const orchMsg: ChatSwarmMsg = { agent: 'Orchestratore', agentRole: orchRole, content: orchestratorBrief, kind: 'brief', mentions: involvedAgents, round: 0 };
   thread.push(orchMsg);
