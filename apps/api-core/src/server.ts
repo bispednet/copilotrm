@@ -1706,6 +1706,55 @@ function extractMentions(text: string): string[] {
   return [...new Set((text.match(/@([A-Za-zÀ-ù]+)/g) ?? []).map((m) => m.slice(1)).filter((a) => CHAT_AGENTS_LIST.includes(a)))];
 }
 
+function inferRelevantAgents(message: string, customerTickets: AssistanceTicket[], telcoCoverage?: TelcoCoverageLookup | null): string[] {
+  const text = message.toLowerCase();
+  const agents = new Set<string>();
+  if (
+    /\b(cliente|anagrafica|contatto|telefono|numero|nuovo cliente|duplicat|cammelli|ragione sociale|partita iva)\b/i.test(text)
+  ) {
+    agents.add('Anagrafiche');
+  }
+  if (
+    telcoCoverage ||
+    /\b(fibra|ftth|fttc|fwa|copertura|copertura fibra|copertura civica|civico|indirizzo|via |piazza |viale |corso |telefono fisso|rete fissa|mobile|sim|connettivit|telefonia|router)\b/i.test(text)
+  ) {
+    agents.add('Telefonia');
+    agents.add('Commerciale');
+  }
+  if (
+    /\b(assistenza|riparazione|ticket|installazione|non va|guasto|configurazione|setup|difetto|diagnosi|supporto|helpdesk)\b/i.test(text) ||
+    customerTickets.length > 0
+  ) {
+    agents.add('Assistenza');
+  }
+  if (/\b(energia|luce|gas|bolletta|pod|pdr|fornitura|kwh)\b/i.test(text)) {
+    agents.add('Energia');
+    agents.add('Commerciale');
+  }
+  if (/\b(pc|notebook|laptop|desktop|stampante|server|smartphone|tablet|hardware|monitor)\b/i.test(text)) {
+    agents.add('Hardware');
+    agents.add('Commerciale');
+  }
+  if (/\b(reclamo|disdetta|ritardo|insoddisfatt|arrabbiat|sollecito|churn|retention|richiamare)\b/i.test(text)) {
+    agents.add('CustomerCare');
+  }
+  if (agents.size === 0) {
+    agents.add(customerTickets.length > 0 ? 'Assistenza' : 'Commerciale');
+    agents.add('CustomerCare');
+  }
+  return [...agents];
+}
+
+function prioritizeMentionedAgents(mentions: string[], preferred: string[], maxAgents = 4): string[] {
+  const preferredSet = new Set(preferred);
+  const ordered = [...mentions].sort((left, right) => {
+    const leftScore = preferredSet.has(left) ? 0 : 1;
+    const rightScore = preferredSet.has(right) ? 0 : 1;
+    return leftScore - rightScore;
+  });
+  return [...new Set(ordered)].slice(0, maxAgents);
+}
+
 async function runAgentTurn(params: {
   llm: LLMClientLike;
   messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }>;
@@ -1835,8 +1884,8 @@ async function runChatOrchestration(params: {
   const { prompt: orchPrompt, role: orchRole } = buildAgentSystemPrompt('Orchestratore', characterStudio);
   let orchestratorBrief = '';
   let involvedAgents: string[] = [];
+  const preferredAgents = inferRelevantAgents(message, customerTickets, telcoCoverage);
 
-  void prewarmAgents(['Orchestratore', ...CHAT_AGENTS_LIST, 'Critico', 'Moderatore']);
   await prewarmAgents(['Orchestratore']);
 
   try {
@@ -1856,11 +1905,13 @@ async function runChatOrchestration(params: {
     });
     involvedAgents = extractMentions(orchestratorBrief);
     if (involvedAgents.length === 0) {
-      involvedAgents = customerTickets.length > 0 ? ['Anagrafiche', 'Assistenza', 'Commerciale'] : ['Anagrafiche', 'Commerciale', 'CustomerCare'];
+      involvedAgents = preferredAgents;
+    } else {
+      involvedAgents = prioritizeMentionedAgents(involvedAgents, preferredAgents);
     }
   } catch {
-    orchestratorBrief = `@Anagrafiche @Assistenza @Commerciale — Analizzare la richiesta: "${message}".${customer ? ` Cliente: ${customer.fullName}.` : ''}`;
-    involvedAgents = ['Anagrafiche', 'Assistenza', 'Commerciale'];
+    involvedAgents = preferredAgents;
+    orchestratorBrief = `@${involvedAgents.join(' @')} — Analizzare la richiesta: "${message}".${customer ? ` Cliente: ${customer.fullName}.` : ''}`;
   }
 
   const needsIdentityCheck =
