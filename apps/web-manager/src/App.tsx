@@ -1,7 +1,64 @@
 import React, { useEffect, useState } from 'react';
 import { FooterBar, TopHeader } from './components/Chrome';
 
-const API = (import.meta as { env?: { VITE_API_BASE_URL?: string } }).env?.VITE_API_BASE_URL ?? 'http://localhost:4010';
+type RuntimeLinks = {
+  apiBase: string;
+  assistUrl: string;
+  crmUrl: string;
+  managerUrl: string;
+  apiStatusUrl: string;
+  healthUrl: string;
+  infraUrl: string;
+  docsUrl: string;
+};
+
+function resolveRuntimeLinks(): RuntimeLinks {
+  const env = (import.meta as { env?: { VITE_API_BASE_URL?: string; VITE_DOCS_URL?: string } }).env ?? {};
+  const docsUrl = env.VITE_DOCS_URL?.trim() || 'https://github.com/bispednet/copilotrm';
+  if (typeof window === 'undefined') {
+    return {
+      apiBase: env.VITE_API_BASE_URL?.trim() || 'http://localhost:4010',
+      assistUrl: 'http://localhost:5174',
+      crmUrl: 'http://localhost:5173',
+      managerUrl: 'http://localhost:5175',
+      apiStatusUrl: 'http://localhost:4010/api/system/infra',
+      healthUrl: 'http://localhost:4010/health',
+      infraUrl: 'http://localhost:4010/api/system/infra',
+      docsUrl,
+    };
+  }
+
+  const { protocol, hostname } = window.location;
+  if (hostname.endsWith('eeess.cyou')) {
+    const apiOrigin = `${protocol}//api.eeess.cyou`;
+    return {
+      apiBase: env.VITE_API_BASE_URL?.trim() || apiOrigin,
+      assistUrl: `${protocol}//app.eeess.cyou`,
+      crmUrl: `${protocol}//crm.eeess.cyou`,
+      managerUrl: `${protocol}//manager.eeess.cyou`,
+      apiStatusUrl: `${apiOrigin}/api/system/infra`,
+      healthUrl: `${apiOrigin}/health`,
+      infraUrl: `${apiOrigin}/api/system/infra`,
+      docsUrl,
+    };
+  }
+
+  const host = hostname || 'localhost';
+  const apiOrigin = env.VITE_API_BASE_URL?.trim() || `${protocol}//${host}:4010`;
+  return {
+    apiBase: apiOrigin,
+    assistUrl: `${protocol}//${host}:5174`,
+    crmUrl: `${protocol}//${host}:5173`,
+    managerUrl: `${protocol}//${host}:5175`,
+    apiStatusUrl: `${apiOrigin}/api/system/infra`,
+    healthUrl: `${apiOrigin}/health`,
+    infraUrl: `${apiOrigin}/api/system/infra`,
+    docsUrl,
+  };
+}
+
+const LINKS = resolveRuntimeLinks();
+const API = LINKS.apiBase;
 
 type Role = 'admin' | 'manager' | 'viewer' | 'sales' | 'content' | 'assist';
 type Page =
@@ -473,11 +530,11 @@ function App() {
       product="CopilotRM"
       area="Manager Control Room"
       links={[
-        { href: 'http://localhost:5175', label: 'Manager' },
-        { href: 'http://localhost:5173', label: 'CRM' },
-        { href: 'http://localhost:5174', label: 'Assist' },
-        { href: 'http://localhost:4010/api/system/infra', label: 'API Status', external: true },
-        { href: 'https://github.com/bispednet/copilotrm', label: 'Documentazione', external: true },
+        { href: LINKS.managerUrl, label: 'Manager' },
+        { href: LINKS.crmUrl, label: 'CRM' },
+        { href: LINKS.assistUrl, label: 'Assist' },
+        { href: LINKS.apiStatusUrl, label: 'API Status', external: true },
+        { href: LINKS.docsUrl, label: 'Documentazione', external: true },
       ]}
     />
     <main className="shell appShell">
@@ -507,9 +564,9 @@ function App() {
           ))}
         </nav>
         <div className="crossNav">
-          <a href="http://localhost:5173">CRM</a>
-          <a href="http://localhost:5174">Assist</a>
-          <a href="http://localhost:5175">Control</a>
+          <a href={LINKS.crmUrl}>CRM</a>
+          <a href={LINKS.assistUrl}>Assist</a>
+          <a href={LINKS.managerUrl}>Control</a>
         </div>
         <button className="ghost" onClick={() => void runAction('refresh', refreshAll)} disabled={busy}>Refresh</button>
         <small className="muted">{log || 'Nessuna azione'}</small>
@@ -1772,8 +1829,8 @@ function App() {
     <FooterBar
       text="CopilotRM Manager · obiettivi, approvazioni e stato orchestrazione in un’unica sala di regia."
       links={[
-        { href: 'http://localhost:4010/health', label: 'Health', external: true },
-        { href: 'http://localhost:4010/api/system/infra', label: 'Infra', external: true },
+        { href: LINKS.healthUrl, label: 'Health', external: true },
+        { href: LINKS.infraUrl, label: 'Infra', external: true },
       ]}
     />
     </>
