@@ -536,6 +536,66 @@ function pickTopConnectivityOffer(offers: ProductOffer[], objectives: ManagerObj
   return candidates[0] ?? null;
 }
 
+function normalizeArtifactText(value: string): string {
+  return value
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .replace(/\b(e|ed|il|lo|la|i|gli|le|un|una|uno|di|del|della|delle|dei|da|per|con|su|al|alla|alle)\b/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function artifactSimilarity(a: string, b: string): number {
+  const aTokens = new Set(normalizeArtifactText(a).split(' ').filter((token) => token.length > 2));
+  const bTokens = new Set(normalizeArtifactText(b).split(' ').filter((token) => token.length > 2));
+  if (!aTokens.size || !bTokens.size) return 0;
+  let intersection = 0;
+  for (const token of aTokens) {
+    if (bTokens.has(token)) intersection += 1;
+  }
+  const union = new Set([...aTokens, ...bTokens]).size;
+  return union > 0 ? intersection / union : 0;
+}
+
+function findReusableTask(state: ApiState, candidate: TaskItem): TaskItem | null {
+  const openTasks = state.tasks.list({ status: 'open' });
+  return openTasks.find((item) => {
+    if (item.customerId !== candidate.customerId) return false;
+    if (item.kind !== candidate.kind) return false;
+    if (item.assigneeRole !== candidate.assigneeRole) return false;
+    return artifactSimilarity(item.title, candidate.title) >= 0.7;
+  }) ?? null;
+}
+
+function findReusableOutbox(state: ApiState, candidate: CommunicationDraft): OutboxItem | null {
+  const candidates = state.drafts.list().filter((item) => {
+    if (!['pending-approval', 'approved', 'queued'].includes(item.status)) return false;
+    if (item.draft.customerId !== candidate.customerId) return false;
+    if (item.draft.channel !== candidate.channel) return false;
+    if (item.draft.audience !== candidate.audience) return false;
+    if ((item.draft.recipientRef ?? '') !== (candidate.recipientRef ?? '')) return false;
+    return true;
+  });
+  return candidates.find((item) => {
+    const left = item.draft.subject ?? item.draft.body;
+    const right = candidate.subject ?? candidate.body;
+    return artifactSimilarity(left, right) >= 0.82;
+  }) ?? null;
+}
+
+function findReusableOpportunity(state: ApiState, candidate: CustomerOpportunity): CustomerOpportunity | null {
+  const recent = state.customerOpportunities.list({ customerId: candidate.customerId, limit: 20 });
+  return recent.find((item) => {
+    if (!['open', 'pending-approval', 'approved', 'sent'].includes(item.status)) return false;
+    if (item.source !== candidate.source) return false;
+    const offerOverlap = item.offerIds.some((offerId) => candidate.offerIds.includes(offerId));
+    if (offerOverlap) return true;
+    return artifactSimilarity(`${item.title} ${item.summary}`, `${candidate.title} ${candidate.summary}`) >= 0.74;
+  }) ?? null;
+}
+
 async function materializeChatExecutionArtifacts(params: {
   state: ApiState;
   customer?: CustomerProfile;
@@ -549,17 +609,19 @@ async function materializeChatExecutionArtifacts(params: {
   const { state, customer, message, synthesis, telcoCoverage, activeOffers, activeObjectives, swarmRunId } = params;
   if (!customer?.id) return null;
 
-  const tasks: TaskItem[] = [];
-  const drafts: CommunicationDraft[] = [];
-  let opportunity: CustomerOpportunity | null = null;
+  const candidateTasks: TaskItem[] = [];
+  const candidateDrafts: CommunicationDraft[] = [];
+  let candidateOpportunity: CustomerOpportunity | null = null;
   let consultTopOffer: { id: string; title: string } | null = null;
 
   if (isTelcoSalesRequest(message, synthesis)) {
     const telephonyTaskTitle = telcoCoverage?.candidates.length
       ? `Verifica finale copertura e proposta fibra per ${customer.fullName}`
-      : `Recuperare indirizzo/civico per proposta fibra ${customer.fullName}`;
+      : telcoCoverage?.fixedLineHint
+        ? `Verificare copertura linea ${telcoCoverage.fixedLineHint} e recuperare civico per ${customer.fullName}`
+        : `Recuperare indirizzo/civico per proposta fibra ${customer.fullName}`;
 
-    tasks.push({
+    candidateTasks.push({
       id: makeId('task'),
       kind: 'followup',
       title: telephonyTaskTitle,
@@ -589,7 +651,7 @@ async function materializeChatExecutionArtifacts(params: {
         llm: state.llm ?? undefined,
       });
       consultTopOffer = consult.topOffer ? { id: consult.topOffer.id, title: consult.topOffer.title } : null;
-      opportunity = createCustomerOpportunity({
+      candidateOpportunity = createCustomerOpportunity({
         customerId: customer.id,
         source: 'consult',
         status: 'open',
@@ -613,7 +675,7 @@ async function materializeChatExecutionArtifacts(params: {
       const customerFollowup = telcoCoverage?.candidates.length
         ? `Ciao ${customer.fullName.split(' ')[0]}, abbiamo individuato il civico ${telcoCoverage.candidates[0]?.fullAddress}. Ti va bene se prepariamo la proposta fibra e ti richiamiamo con l’offerta più adatta?`
         : `Ciao ${customer.fullName.split(' ')[0]}, per verificare davvero la copertura fibra ci serve l’indirizzo completo con civico. Appena ce lo confermi prepariamo la proposta.`;
-      drafts.push({
+      candidateDrafts.push({
         id: makeId('draft'),
         customerId: customer.id,
         channel: 'whatsapp',
@@ -626,7 +688,7 @@ async function materializeChatExecutionArtifacts(params: {
       });
     }
 
-    drafts.push({
+    candidateDrafts.push({
       id: makeId('draft'),
       customerId: customer.id,
       channel: 'telegram',
@@ -644,18 +706,43 @@ async function materializeChatExecutionArtifacts(params: {
     });
   }
 
-  if (!tasks.length && !drafts.length && !opportunity) return null;
+  if (!candidateTasks.length && !candidateDrafts.length && !candidateOpportunity) return null;
 
-  state.tasks.addMany(tasks);
-  void state.postgresMirror.saveTasks(tasks);
+  const persistedTasks: TaskItem[] = [];
+  const taskArtifacts = candidateTasks.map((task) => {
+    const reusable = findReusableTask(state, task);
+    if (reusable) return reusable;
+    persistedTasks.push(task);
+    return task;
+  });
 
-  const outboxItems = state.drafts.addMany(drafts);
-  drafts.forEach((draft) => state.draftsRaw.add(draft));
-  if (outboxItems.length > 0) void state.postgresMirror.saveOutbox(outboxItems);
+  if (persistedTasks.length > 0) {
+    state.tasks.addMany(persistedTasks);
+    void state.postgresMirror.saveTasks(persistedTasks);
+  }
 
-  if (opportunity) {
-    state.customerOpportunities.upsert(opportunity);
-    void state.postgresMirror.saveCustomerOpportunity(opportunity);
+  const reusableOutboxItems = new Map<string, OutboxItem>();
+  const draftsToPersist: CommunicationDraft[] = [];
+  for (const draft of candidateDrafts) {
+    const reusable = findReusableOutbox(state, draft);
+    if (reusable) {
+      reusableOutboxItems.set(draft.id, reusable);
+    } else {
+      draftsToPersist.push(draft);
+    }
+  }
+  const createdOutboxItems = draftsToPersist.length > 0 ? state.drafts.addMany(draftsToPersist) : [];
+  draftsToPersist.forEach((draft) => state.draftsRaw.add(draft));
+  if (createdOutboxItems.length > 0) void state.postgresMirror.saveOutbox(createdOutboxItems);
+  const createdOutboxMap = new Map(createdOutboxItems.map((item) => [item.id, item]));
+  const outboxArtifacts = candidateDrafts
+    .map((draft) => reusableOutboxItems.get(draft.id) ?? createdOutboxMap.get(draft.id) ?? null)
+    .filter(Boolean) as OutboxItem[];
+
+  const opportunity = candidateOpportunity ? (findReusableOpportunity(state, candidateOpportunity) ?? candidateOpportunity) : null;
+  if (candidateOpportunity && opportunity?.id === candidateOpportunity.id) {
+    state.customerOpportunities.upsert(candidateOpportunity);
+    void state.postgresMirror.saveCustomerOpportunity(candidateOpportunity);
   }
 
   state.customers.addInteraction(customer.id, {
@@ -663,7 +750,7 @@ async function materializeChatExecutionArtifacts(params: {
     type: 'handoff.received',
     channel: 'crm',
     agentName: 'chat-executor',
-    summary: `Artefatti operativi generati da chat: ${tasks.length} task, ${outboxItems.length} draft`,
+    summary: `Artefatti operativi da chat: ${taskArtifacts.length} task, ${outboxArtifacts.length} draft${opportunity ? ', opportunità cliente' : ''}`,
     relatedOfferId: consultTopOffer?.id,
     relatedRunId: swarmRunId ?? undefined,
     createdAt: nowIso(),
@@ -671,7 +758,7 @@ async function materializeChatExecutionArtifacts(params: {
   void state.postgresMirror.saveCustomer(state.customers.getById(customer.id) ?? customer);
 
   return {
-    tasks: tasks.map((task) => ({
+    tasks: taskArtifacts.map((task) => ({
       id: task.id,
       kind: task.kind,
       title: task.title,
@@ -679,7 +766,7 @@ async function materializeChatExecutionArtifacts(params: {
       status: task.status,
       priority: task.priority,
     })),
-    outbox: outboxItems.map((item) => ({
+    outbox: outboxArtifacts.map((item) => ({
       id: item.id,
       channel: item.draft.channel,
       audience: item.draft.audience,
@@ -1791,7 +1878,16 @@ async function runChatOrchestration(params: {
   onMessage?.(orchMsg);
 
   // ── Step 2: Agenti coinvolti — SEQUENZIALI (ognuno vede chi ha parlato prima) ─
-  const extraAgentsCalled = new Set<string>();
+  const followUpRequests = new Map<string, Set<string>>();
+  const registerFollowUpMentions = (fromAgent: string, mentions: string[]): void => {
+    for (const mention of mentions) {
+      if (mention === fromAgent) continue;
+      if (['Critico', 'Moderatore', 'Orchestratore'].includes(mention)) continue;
+      const requesters = followUpRequests.get(mention) ?? new Set<string>();
+      requesters.add(fromAgent);
+      followUpRequests.set(mention, requesters);
+    }
+  };
 
   for (const agentName of involvedAgents) {
     const { prompt: sysPrompt, role: agentRole } = buildAgentSystemPrompt(agentName, characterStudio);
@@ -1819,25 +1915,26 @@ async function runChatOrchestration(params: {
     } catch { /* usa fallback */ }
 
     agentResponses[agentName] = content;
-    const mentions = extractMentions(content).filter((a) => !involvedAgents.includes(a));
-    mentions.forEach((m) => extraAgentsCalled.add(m));
+    const mentions = extractMentions(content);
+    registerFollowUpMentions(agentName, mentions);
     const msg: ChatSwarmMsg = { agent: agentName, agentRole, content, kind: 'analysis', mentions, round: 1 };
     thread.push(msg);
     onMessage?.(msg);
   }
 
   // ── Step 3: Agenti extra taggati — sequenziali ──────────────────────────────
-  for (const agentName of [...extraAgentsCalled].slice(0, 2)) {
+  for (const agentName of [...followUpRequests.keys()].slice(0, 3)) {
     const { prompt: sysPrompt, role: agentRole } = buildAgentSystemPrompt(agentName, characterStudio);
     const domainData = buildAgentDataContext(agentName, customer, customerTickets, customerResolutions, customerOpportunities, activeOffers, activeObjectives, telcoCoverage);
+    const requestedBy = [...(followUpRequests.get(agentName) ?? [])];
 
     let content = `[${agentName} non disponibile]`;
     try {
       content = await runAgentTurn({
         llm,
         messages: [
-          { role: 'system', content: `${sysPrompt}\n\nSei stato chiamato dai colleghi. Rispondi al punto che ti riguarda (max 70 parole), cita i dati reali.` },
-          { role: 'user', content: `${threadSummary()}\n\n${domainData}` },
+          { role: 'system', content: `${sysPrompt}\n\nSei stato richiamato dai colleghi. Rispondi al punto che ti riguarda (max 70 parole), cita i dati reali e chiudi con una conclusione operativa.` },
+          { role: 'user', content: `Richiesta da ${requestedBy.map((name) => `@${name}`).join(', ') || 'colleghi'}.\n\n${threadSummary()}\n\n${domainData}` },
         ],
         opts: llmOptsFor(agentName, { tier: 'small', maxTokens: 140 }),
         agent: agentName,
@@ -1850,7 +1947,9 @@ async function runChatOrchestration(params: {
     } catch { /* usa fallback */ }
 
     agentResponses[agentName] = content;
-    const msg: ChatSwarmMsg = { agent: agentName, agentRole, content, kind: 'analysis', mentions: [], round: 1 };
+    const mentions = extractMentions(content);
+    registerFollowUpMentions(agentName, mentions);
+    const msg: ChatSwarmMsg = { agent: agentName, agentRole, content, kind: 'analysis', mentions, round: 1 };
     thread.push(msg);
     onMessage?.(msg);
   }
@@ -1954,7 +2053,7 @@ async function runChatOrchestration(params: {
     reviewMentions = review.mentions;
 
     const followUpAgents = reviewMentions.filter((agentName) => agentName !== 'Moderatore');
-    const readyForModerator = reviewMentions.includes('Moderatore') || followUpAgents.length === 0;
+    const readyForModerator = followUpAgents.length === 0 && (reviewMentions.length === 0 || reviewMentions.includes('Moderatore'));
     if (readyForModerator) break;
 
     for (const agentName of followUpAgents.slice(0, 2)) {

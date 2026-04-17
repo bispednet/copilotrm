@@ -96,13 +96,13 @@ export class GeminiProvider {
   async sendPrompt(page: Page, prompt: string): Promise<void> {
     await this.ensureReady(page);
     if (await this.isBusy(page).catch(() => false)) {
-      await this.waitUntilIdle(page, 3_000);
+      await this.waitUntilIdle(page, 800);
     }
 
     // Wait for Angular to finish replacing DOM elements after page load.
     // We verify the input is STABLE (same element) for two consecutive checks
     // before trusting it with click+type operations.
-    const input = await this.waitForStableInput(page, 1_200);
+    const input = await this.waitForStableInput(page, 350);
     if (!input) throw new Error("Input Gemini non trovato.");
 
     await input.click();
@@ -111,18 +111,50 @@ export class GeminiProvider {
     if (tagName === "textarea" || tagName === "input") {
       await input.fill(prompt);
     } else {
-      // Clear via JS so we don't need to select-all
-      await input.evaluate((el: Element) => {
-        (el as { focus?: () => void; textContent: string | null }).focus?.();
-        el.textContent = "";
-      });
-      // Use locator-scoped pressSequentially / press — safe for parallel pages.
-      // page.keyboard.* is global to the browser process and causes keystroke
-      // collisions when two tabs are being operated simultaneously.
-      const lines = prompt.split("\n");
-      for (let i = 0; i < lines.length; i++) {
-        if (i > 0) await input.press("Shift+Enter"); // line break, not submit
-        if (lines[i]) await input.pressSequentially(lines[i], { delay: 0 });
+      const insertedDirectly = await input.evaluate((el: Element, value: string) => {
+        const target = el as HTMLElement;
+        if (!target) return false;
+        target.focus();
+
+        const setContent = (): void => {
+          target.textContent = "";
+          const lines = String(value).split("\n");
+          lines.forEach((line, index) => {
+            if (index > 0) target.appendChild(document.createElement("br"));
+            target.appendChild(document.createTextNode(line));
+          });
+        };
+
+        try {
+          setContent();
+          target.dispatchEvent(new InputEvent("beforeinput", {
+            inputType: "insertText",
+            data: value,
+            bubbles: true,
+            cancelable: true,
+          }));
+          target.dispatchEvent(new InputEvent("input", {
+            inputType: "insertText",
+            data: value,
+            bubbles: true,
+          }));
+          target.dispatchEvent(new Event("change", { bubbles: true }));
+          return true;
+        } catch {
+          return false;
+        }
+      }, prompt).catch(() => false);
+
+      if (!insertedDirectly) {
+        await input.evaluate((el: Element) => {
+          (el as { focus?: () => void; textContent: string | null }).focus?.();
+          el.textContent = "";
+        });
+        const lines = prompt.split("\n");
+        for (let i = 0; i < lines.length; i++) {
+          if (i > 0) await input.press("Shift+Enter");
+          if (lines[i]) await input.pressSequentially(lines[i], { delay: 0 });
+        }
       }
     }
 
@@ -256,14 +288,14 @@ export class GeminiProvider {
   private async readLastMessage(page: Page, baseline: ConversationSnapshot): Promise<string> {
     // ── Count-based guard: only return content when a NEW assistant node exists ──
     const currentCount = await this.countAssistantNodes(page);
+    const providerText = this.sanitize(await this.readAssistantText(page), baseline.prompt);
+    if (providerText && providerText !== baseline.lastText) {
+      return providerText;
+    }
     if (currentCount <= baseline.count) {
-      // No new assistant node has appeared — nothing to return regardless of text.
-      // This prevents returning the old response when the prompt was never sent.
       return "";
     }
 
-    // A new assistant node exists — read its content.
-    const providerText = this.sanitize(await this.readAssistantText(page), baseline.prompt);
     if (providerText) return providerText;
 
     // Fallback: try messageSelectors (generic container approach)
@@ -513,7 +545,7 @@ export class GeminiProvider {
   private async waitForStableInput(page: Page, timeoutMs: number): Promise<import("playwright").Locator | null> {
     const selectors = [this.config.inputSelector, ...this.config.readySelectors];
     const deadline = Date.now() + timeoutMs;
-    const stabilityDelayMs = 30;
+    const stabilityDelayMs = 18;
 
     let prevHandle: import("playwright").JSHandle | null = null;
 
@@ -561,7 +593,7 @@ export class GeminiProvider {
         const visible = await page.locator(selector).first().isVisible().catch(() => false);
         if (visible) return selector;
       }
-      await sleep(60);
+      await sleep(20);
     }
     return null;
   }
@@ -602,7 +634,7 @@ export class GeminiProvider {
 
     for (let attempt = 0; attempt < 4; attempt++) {
       if (await looksSubmitted()) return;
-      await sleep(20);
+      await sleep(8);
       if (await looksSubmitted()) return;
 
       const freshInput = await this.firstVisibleLocator(
@@ -618,7 +650,7 @@ export class GeminiProvider {
 
       for (const key of keys) {
         await freshInput.press(key).catch(() => undefined);
-        await sleep(30);
+        await sleep(10);
         if (await looksSubmitted()) return;
       }
 

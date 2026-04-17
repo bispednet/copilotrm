@@ -9,6 +9,7 @@ import {
   buildStatusText,
   buildTraceText,
   buildWorkspaceText,
+  type ChannelButton,
   formatCompactCount,
   isPanelAction,
   parseCommandAction,
@@ -64,25 +65,50 @@ function nowIso(): string {
   return new Date().toISOString();
 }
 
-async function readChatSynthesis(
-  message: string,
-  sessionId?: string,
-  source: 'whatsapp' | 'telegram' = 'telegram',
-): Promise<{ synthesis: string; sessionId: string | null }> {
+interface ChannelChatExecutionArtifacts {
+  tasks: Array<{ id: string; kind: string; title: string; assigneeRole: string; status: string; priority: number }>;
+  outbox: Array<{ id: string; channel: string; audience: string; status: string; needsApproval: boolean; reason: string; body: string }>;
+  opportunity?: { id: string; title: string; status: string; summary: string } | null;
+  consultTopOffer?: { id: string; title: string } | null;
+}
+
+async function apiRequest<T>(path: string, init: RequestInit = {}): Promise<T> {
   const apiBase =
     process.env.COPILOTRM_API_URL ??
     process.env.API_CORE_URL ??
     `http://127.0.0.1:${process.env.PORT_API_CORE ?? 4010}`;
+  const headers = new Headers(init.headers ?? {});
+  headers.set('x-bisp-role', 'admin');
+  if (init.body && !headers.has('content-type')) headers.set('content-type', 'application/json');
+  const res = await fetch(`${apiBase}${path}`, {
+    ...init,
+    headers,
+  });
+  const json = (await res.json().catch(() => ({}))) as T & { error?: string; detail?: string };
+  if (!res.ok) {
+    throw new Error(json.detail ?? json.error ?? `request failed (${res.status})`);
+  }
+  return json;
+}
 
+async function readChatSynthesis(
+  message: string,
+  sessionId?: string,
+  source: 'whatsapp' | 'telegram' = 'telegram',
+): Promise<{ synthesis: string; sessionId: string | null; executionArtifacts: ChannelChatExecutionArtifacts | null }> {
+  const apiBase =
+    process.env.COPILOTRM_API_URL ??
+    process.env.API_CORE_URL ??
+    `http://127.0.0.1:${process.env.PORT_API_CORE ?? 4010}`;
   const res = await fetch(`${apiBase}/api/chat`, {
     method: 'POST',
     headers: {
+      Accept: 'text/event-stream',
       'content-type': 'application/json',
       'x-bisp-role': 'admin',
     },
     body: JSON.stringify({ message, sessionId, source }),
   });
-
   if (!res.ok || !res.body) {
     throw new Error(`chat endpoint failed (${res.status})`);
   }
@@ -92,6 +118,7 @@ async function readChatSynthesis(
   let buffer = '';
   let synthesis = '';
   let finalSessionId: string | null = sessionId ?? null;
+  let executionArtifacts: ChannelChatExecutionArtifacts | null = null;
 
   while (true) {
     const { done, value } = await reader.read();
@@ -103,10 +130,17 @@ async function readChatSynthesis(
       buffer = buffer.slice(boundary + 2);
       if (raw.startsWith('data: ')) {
         try {
-          const parsed = JSON.parse(raw.slice(6)) as { type?: string; synthesis?: string; sessionId?: string; message?: string };
+          const parsed = JSON.parse(raw.slice(6)) as {
+            type?: string;
+            synthesis?: string;
+            sessionId?: string;
+            message?: string;
+            executionArtifacts?: ChannelChatExecutionArtifacts | null;
+          };
           if (parsed.type === 'done') {
             synthesis = parsed.synthesis ?? synthesis;
             finalSessionId = parsed.sessionId ?? finalSessionId;
+            executionArtifacts = (parsed.executionArtifacts as ChannelChatExecutionArtifacts | null) ?? executionArtifacts;
           }
           if (parsed.type === 'error' && parsed.message) {
             throw new Error(parsed.message);
@@ -122,27 +156,22 @@ async function readChatSynthesis(
   return {
     synthesis: synthesis.trim() || 'No response generated.',
     sessionId: finalSessionId,
+    executionArtifacts,
   };
 }
 
 async function postOutboxAction<T>(path: string, body: Record<string, unknown> = {}): Promise<T> {
-  const apiBase =
-    process.env.COPILOTRM_API_URL ??
-    process.env.API_CORE_URL ??
-    `http://127.0.0.1:${process.env.PORT_API_CORE ?? 4010}`;
-  const res = await fetch(`${apiBase}${path}`, {
+  return apiRequest<T>(path, {
     method: 'POST',
-    headers: {
-      'content-type': 'application/json',
-      'x-bisp-role': 'admin',
-    },
     body: JSON.stringify(body),
   });
-  const json = (await res.json().catch(() => ({}))) as T & { error?: string; detail?: string };
-  if (!res.ok) {
-    throw new Error(json.detail ?? json.error ?? `request failed (${res.status})`);
-  }
-  return json;
+}
+
+async function patchTaskAction<T>(path: string, body: Record<string, unknown> = {}): Promise<T> {
+  return apiRequest<T>(path, {
+    method: 'PATCH',
+    body: JSON.stringify(body),
+  });
 }
 
 function renderApprovalsText(state: ApiState): string {
@@ -217,6 +246,86 @@ function renderLookupText(state: ApiState, query: string): string {
       return `${index + 1}. ${customer.fullName} · ${customer.phone ?? customer.email ?? 'no-contact'} · segments ${customer.segments.join(', ')}${latest ? ` · last ${snippet(latest.summary, 44)}` : ''}`;
     }),
   ].join('\n');
+}
+
+function buildArtifactInstructions(artifacts: ChannelChatExecutionArtifacts): ChannelInstruction[] {
+  const instructions: ChannelInstruction[] = [];
+
+  if (artifacts.tasks.length > 0) {
+    const task = artifacts.tasks[0];
+    instructions.push({
+      mode: 'new-message',
+      text: [
+        'Execution artifact · Task',
+        '',
+        `${task.title}`,
+        `Owner: ${task.assigneeRole} · status ${task.status} · p${task.priority}`,
+      ].join('\n'),
+      buttons: [
+        [
+          { id: `artifact:task:done:${task.id}`, label: 'Done task' },
+          { id: 'panel:status', label: 'Status' },
+        ],
+        [
+          { id: 'panel:actions', label: 'Actions' },
+          { id: 'panel:home', label: 'Home' },
+        ],
+      ],
+    });
+  }
+
+  if (artifacts.outbox.length > 0) {
+    const draft = artifacts.outbox[0];
+    const primaryRow: ChannelButton[] = [];
+    if (draft.status === 'pending-approval') {
+      primaryRow.push(
+        { id: `artifact:outbox:approve:${draft.id}`, label: 'Approve draft' },
+        { id: `artifact:outbox:approve-send:${draft.id}`, label: 'Approve+Send' },
+      );
+    } else if (draft.status === 'approved' || draft.status === 'queued') {
+      primaryRow.push({ id: `artifact:outbox:send:${draft.id}`, label: 'Send draft' });
+    }
+
+    instructions.push({
+      mode: 'new-message',
+      text: [
+        'Execution artifact · Draft',
+        '',
+        `[${draft.channel}/${draft.audience}] ${draft.status}`,
+        snippet(draft.body, 220),
+      ].join('\n'),
+      buttons: [
+        primaryRow.length > 0 ? primaryRow : [{ id: 'panel:outbox', label: 'Outbox' }],
+        [
+          { id: 'panel:approvals', label: 'Approvals' },
+          { id: 'panel:home', label: 'Home' },
+        ],
+      ],
+    });
+  }
+
+  if (artifacts.opportunity) {
+    instructions.push({
+      mode: 'new-message',
+      text: [
+        'Execution artifact · Opportunity',
+        '',
+        `${artifacts.opportunity.title} · ${artifacts.opportunity.status}`,
+        artifacts.opportunity.summary,
+      ].join('\n'),
+      buttons: [
+        [
+          { id: 'panel:status', label: 'Status' },
+          { id: 'panel:actions', label: 'Actions' },
+        ],
+        [
+          { id: 'panel:home', label: 'Home' },
+        ],
+      ],
+    });
+  }
+
+  return instructions;
 }
 
 function baseButtonsForPanel(panel: ChannelPanelId): ChannelInstruction['buttons'] {
@@ -504,6 +613,161 @@ export async function handleChannelControlRequest(repo: ChannelControlRepository
   const text = request.text?.trim() ?? '';
   const peer = repo.touchPeer(request.channel, request.peerId, request.profile);
   const prefersUpdate = Boolean(request.messageId && request.actionId);
+
+  if (request.actionId?.startsWith('artifact:')) {
+    repo.record(peer.channel, peer.peerId, 'workflow', request.actionId.split(':').slice(0, 3).join(':'));
+  }
+
+  if (request.actionId?.startsWith('artifact:task:done:')) {
+    const taskId = request.actionId.slice('artifact:task:done:'.length);
+    try {
+      const task = await patchTaskAction<{ id: string; title: string; status: string }>(`/api/tasks/${taskId}`, { status: 'done' });
+      return {
+        handled: true,
+        callbackNotice: 'Task updated',
+        instructions: [{
+          mode: 'new-message',
+          text: `Task completed: ${task.title}`,
+          buttons: [
+            [
+              { id: 'panel:status', label: 'Status' },
+              { id: 'panel:home', label: 'Home' },
+            ],
+          ],
+        }],
+      };
+    } catch (error) {
+      return {
+        handled: true,
+        callbackNotice: 'Task failed',
+        instructions: [{
+          mode: 'new-message',
+          text: `Task update failed: ${error instanceof Error ? error.message : String(error)}`,
+          buttons: [
+            [
+              { id: 'panel:status', label: 'Status' },
+              { id: 'panel:home', label: 'Home' },
+            ],
+          ],
+        }],
+      };
+    }
+  }
+
+  if (request.actionId?.startsWith('artifact:outbox:approve-send:')) {
+    const outboxId = request.actionId.slice('artifact:outbox:approve-send:'.length);
+    try {
+      const item = await postOutboxAction<{ draft: { channel: string; body: string } }>(`/api/outbox/${outboxId}/approve-send`, {
+        actor: `${peer.channel}:${peer.peerId}`,
+      });
+      return {
+        handled: true,
+        callbackNotice: 'Draft sent',
+        instructions: [{
+          mode: 'new-message',
+          text: `Draft sent [${item.draft.channel}] ${snippet(item.draft.body, 96)}`,
+          buttons: [
+            [
+              { id: 'panel:outbox', label: 'Outbox' },
+              { id: 'panel:home', label: 'Home' },
+            ],
+          ],
+        }],
+      };
+    } catch (error) {
+      return {
+        handled: true,
+        callbackNotice: 'Send failed',
+        instructions: [{
+          mode: 'new-message',
+          text: `Draft send failed: ${error instanceof Error ? error.message : String(error)}`,
+          buttons: [
+            [
+              { id: 'panel:approvals', label: 'Approvals' },
+              { id: 'panel:home', label: 'Home' },
+            ],
+          ],
+        }],
+      };
+    }
+  }
+
+  if (request.actionId?.startsWith('artifact:outbox:approve:')) {
+    const outboxId = request.actionId.slice('artifact:outbox:approve:'.length);
+    try {
+      const item = await postOutboxAction<{ draft: { channel: string; body: string } }>(`/api/outbox/${outboxId}/approve`, {
+        actor: `${peer.channel}:${peer.peerId}`,
+      });
+      return {
+        handled: true,
+        callbackNotice: 'Draft approved',
+        instructions: [{
+          mode: 'new-message',
+          text: `Draft approved [${item.draft.channel}] ${snippet(item.draft.body, 96)}`,
+          buttons: [
+            [
+              { id: `artifact:outbox:send:${outboxId}`, label: 'Send draft' },
+              { id: 'panel:outbox', label: 'Outbox' },
+            ],
+            [
+              { id: 'panel:home', label: 'Home' },
+            ],
+          ],
+        }],
+      };
+    } catch (error) {
+      return {
+        handled: true,
+        callbackNotice: 'Approve failed',
+        instructions: [{
+          mode: 'new-message',
+          text: `Draft approve failed: ${error instanceof Error ? error.message : String(error)}`,
+          buttons: [
+            [
+              { id: 'panel:approvals', label: 'Approvals' },
+              { id: 'panel:home', label: 'Home' },
+            ],
+          ],
+        }],
+      };
+    }
+  }
+
+  if (request.actionId?.startsWith('artifact:outbox:send:')) {
+    const outboxId = request.actionId.slice('artifact:outbox:send:'.length);
+    try {
+      const item = await postOutboxAction<{ draft: { channel: string; body: string } }>(`/api/outbox/${outboxId}/send`);
+      return {
+        handled: true,
+        callbackNotice: 'Draft sent',
+        instructions: [{
+          mode: 'new-message',
+          text: `Draft sent [${item.draft.channel}] ${snippet(item.draft.body, 96)}`,
+          buttons: [
+            [
+              { id: 'panel:outbox', label: 'Outbox' },
+              { id: 'panel:home', label: 'Home' },
+            ],
+          ],
+        }],
+      };
+    } catch (error) {
+      return {
+        handled: true,
+        callbackNotice: 'Send failed',
+        instructions: [{
+          mode: 'new-message',
+          text: `Draft send failed: ${error instanceof Error ? error.message : String(error)}`,
+          buttons: [
+            [
+              { id: 'panel:outbox', label: 'Outbox' },
+              { id: 'panel:home', label: 'Home' },
+            ],
+          ],
+        }],
+      };
+    }
+  }
 
   const commandAction = text ? parseCommandAction(text) : undefined;
   const actionId = (request.actionId || commandAction) as ChannelActionId | undefined;
@@ -875,7 +1139,7 @@ export async function handleChannelControlRequest(repo: ChannelControlRepository
     }
     try {
       const source = peer.channel === 'whatsapp' ? 'whatsapp' : 'telegram';
-      const { synthesis, sessionId } = await readChatSynthesis(text, peer.lastSessionId, source);
+      const { synthesis, sessionId, executionArtifacts } = await readChatSynthesis(text, peer.lastSessionId, source);
       repo.updatePeer(peer.channel, peer.peerId, { lastSessionId: sessionId ?? undefined });
       return {
         handled: true,
@@ -896,6 +1160,7 @@ export async function handleChannelControlRequest(repo: ChannelControlRepository
               ],
             ],
           },
+          ...(executionArtifacts ? buildArtifactInstructions(executionArtifacts) : []),
         ],
       };
     } catch (error) {
