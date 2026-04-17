@@ -1749,6 +1749,7 @@ async function runChatOrchestration(params: {
   let orchestratorBrief = '';
   let involvedAgents: string[] = [];
 
+  void prewarmAgents(['Orchestratore', ...CHAT_AGENTS_LIST, 'Critico', 'Moderatore']);
   await prewarmAgents(['Orchestratore']);
 
   try {
