@@ -8,6 +8,8 @@ Monorepo TypeScript per un AI CRM & Swarm Automation Layer orientato al retail/a
 - storico cliente persistente per opportunità, proposte, follow-up e azioni commerciali
 - agente dedicato `Anagrafiche` nel flusso swarm per nuovi clienti, contatti ambigui e disambiguazione
 - streaming conversazionale reale nel CRM: non solo `sta scrivendo…`, ma testo live agente-per-agente
+- loop swarm rifatto: `Orchestratore` decide se chiudere o chiedere approfondimenti mirati prima di chiamare `Moderatore`
+- lookup copertura connettività da address su portale BUL ufficiale, iniettato nel contesto di `Telefonia` / `Commerciale`
 - lookup cliente da chat libera tramite nome/telefono con creazione controllata della master anagrafica
 - opportunità commerciali e risultati assistenza sempre appesi al cliente e consultabili nello storico
 
@@ -200,6 +202,23 @@ Con provider che supportano streaming, il runtime espone chunk parziali agente-p
 - `done` per la sintesi finale
 
 Sul frontend CRM questo viene renderizzato come thread operativo vivo, più vicino al comportamento già sperimentato su TeGem.
+
+Il provider `tegem` è stato anche ottimizzato per:
+
+- cold-start più rapido delle tab Gemini
+- polling stream più serrato
+- invio prompt più aggressivo nei casi text-only
+
+## Copertura telco reale
+
+Quando nel messaggio compare un indirizzo e la richiesta parla di fibra / copertura / connettività, il backend esegue una lookup reale sul portale BUL ufficiale e inietta nel contesto:
+
+- regione e comune rilevati
+- query normalizzata
+- candidati civico trovati
+- link al portale ufficiale
+
+Questo evita che `Telefonia` prometta verifiche che non ha ancora eseguito.
 
 ---
 

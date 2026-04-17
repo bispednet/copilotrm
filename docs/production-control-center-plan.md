@@ -14,6 +14,8 @@ The product must provide:
 - natural-language flows for non-technical operators
 - persistent customer identity resolution, duplicate review, and lifetime commercial history
 - live multi-agent streaming so operators can see the reasoning thread forming in real time
+- orchestrator-gated swarm reviews before final synthesis
+- real telco coverage lookup from address, not just generic sales heuristics
 
 ## Product Surfaces
 
