@@ -16,6 +16,8 @@ export interface ConversationMessage {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   swarmThread?: any[];
   swarmRunId?: string;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  executionArtifacts?: any;
   createdAt: string;
 }
 

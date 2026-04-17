@@ -116,9 +116,15 @@ type SwarmThreadMsg = {
   mentions: string[];
   round: number;
 };
+type ChatExecutionArtifacts = {
+  tasks: Array<{ id: string; kind: string; title: string; assigneeRole: string; status: string; priority: number }>;
+  outbox: Array<{ id: string; channel: string; audience: string; status: string; needsApproval: boolean; reason: string; body: string }>;
+  opportunity?: { id: string; title: string; status: string; summary: string } | null;
+  consultTopOffer?: { id: string; title: string } | null;
+};
 type ChatMessage =
   | { role: 'user'; content: string }
-  | { role: 'assistant'; content: string; swarmThread?: SwarmThreadMsg[]; swarmRunId?: string | null; customerFound?: { id: string; fullName: string; segments: string[] } | null };
+  | { role: 'assistant'; content: string; swarmThread?: SwarmThreadMsg[]; swarmRunId?: string | null; customerFound?: { id: string; fullName: string; segments: string[] } | null; executionArtifacts?: ChatExecutionArtifacts | null };
 type Toast = { id: number; kind: 'ok' | 'err'; msg: string };
 
 // Agent color palette for the swarm thread UI
@@ -376,6 +382,7 @@ function App() {
                 swarmThread: finalThread,
                 swarmRunId: (event.swarmRunId as string | null) ?? null,
                 customerFound: (event.customer as { id: string; fullName: string; segments: string[] } | null) ?? null,
+                executionArtifacts: (event.executionArtifacts as ChatExecutionArtifacts | null) ?? null,
               }];
               return next;
             });
@@ -1065,6 +1072,44 @@ function App() {
                       }}>
                         {m.content}
                       </div>
+                      {m.role === 'assistant' && m.executionArtifacts && (
+                        <div style={{
+                          marginTop: 8,
+                          border: '1px solid var(--border)',
+                          borderRadius: 10,
+                          background: 'var(--surface-alt)',
+                          padding: '10px 12px',
+                          display: 'flex',
+                          flexDirection: 'column',
+                          gap: 8,
+                        }}>
+                          <div style={{ fontSize: 12, fontWeight: 700, color: 'var(--muted)' }}>Artefatti operativi generati</div>
+                          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', fontSize: 12 }}>
+                            <span>✅ <strong>{m.executionArtifacts.tasks.length}</strong> task</span>
+                            <span>📨 <strong>{m.executionArtifacts.outbox.length}</strong> draft</span>
+                            {m.executionArtifacts.opportunity && <span>💼 opportunità aperta</span>}
+                            {m.executionArtifacts.consultTopOffer && <span>📶 offerta: <strong>{m.executionArtifacts.consultTopOffer.title}</strong></span>}
+                          </div>
+                          {m.executionArtifacts.tasks.length > 0 && (
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                              {m.executionArtifacts.tasks.slice(0, 3).map((task) => (
+                                <div key={task.id} style={{ fontSize: 12, color: 'var(--text)' }}>
+                                  • <strong>{task.title}</strong> · {task.assigneeRole} · p{task.priority}
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                          {m.executionArtifacts.outbox.length > 0 && (
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                              {m.executionArtifacts.outbox.slice(0, 2).map((draft) => (
+                                <div key={draft.id} style={{ fontSize: 12, color: 'var(--muted)' }}>
+                                  • {draft.channel}/{draft.audience} · {draft.status} · {draft.body.slice(0, 120)}{draft.body.length > 120 ? '…' : ''}
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      )}
                     </div>
                   );
                 })}

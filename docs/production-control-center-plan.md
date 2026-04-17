@@ -16,6 +16,7 @@ The product must provide:
 - live multi-agent streaming so operators can see the reasoning thread forming in real time
 - orchestrator-gated swarm reviews before final synthesis
 - real telco coverage lookup from address, not just generic sales heuristics
+- execution artifacts generated directly from CRM chat: persisted tasks, outbox drafts, and grounded opportunities
 
 ## Product Surfaces
 

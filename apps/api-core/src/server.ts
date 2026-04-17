@@ -56,6 +56,7 @@ import {
   ConversationRepository,
   CustomerOpportunityRepository,
   CustomerResolutionRepository,
+  type OutboxItem,
   OutboxStore,
   TaskRepository,
 } from './localRepos';
@@ -512,6 +513,191 @@ function formatTelcoCoverageContext(lookup: TelcoCoverageLookup): string {
   }
   if (lookup.note) lines.push(`Nota: ${lookup.note}`);
   return lines.join('\n');
+}
+
+function isTelcoSalesRequest(message: string, synthesis = ''): boolean {
+  const text = `${message} ${synthesis}`.toLowerCase();
+  return /\b(fibra|copertura|telefonia|connettivita|connettività|router|ftth|fttc|fwa|adsl|wifi|wi-fi|numero fisso)\b/i.test(text);
+}
+
+function scoreConnectivityOffer(offer: ProductOffer, objectives: ManagerObjective[]): number {
+  return (
+    (offer.targetSegments.includes('fibra') ? 2 : 0) +
+    (offer.marginPct ?? 0) / 25 +
+    (objectives.some((objective) => objective.preferredOfferIds.includes(offer.id)) ? 1.5 : 0) +
+    (offer.active ? 0.5 : 0)
+  );
+}
+
+function pickTopConnectivityOffer(offers: ProductOffer[], objectives: ManagerObjective[]): ProductOffer | null {
+  const candidates = offers
+    .filter((offer) => offer.category === 'connectivity' && offer.active)
+    .sort((a, b) => scoreConnectivityOffer(b, objectives) - scoreConnectivityOffer(a, objectives));
+  return candidates[0] ?? null;
+}
+
+async function materializeChatExecutionArtifacts(params: {
+  state: ApiState;
+  customer?: CustomerProfile;
+  message: string;
+  synthesis: string;
+  telcoCoverage?: TelcoCoverageLookup | null;
+  activeOffers: ProductOffer[];
+  activeObjectives: ManagerObjective[];
+  swarmRunId?: string | null;
+}): Promise<ChatExecutionArtifacts | null> {
+  const { state, customer, message, synthesis, telcoCoverage, activeOffers, activeObjectives, swarmRunId } = params;
+  if (!customer?.id) return null;
+
+  const tasks: TaskItem[] = [];
+  const drafts: CommunicationDraft[] = [];
+  let opportunity: CustomerOpportunity | null = null;
+  let consultTopOffer: { id: string; title: string } | null = null;
+
+  if (isTelcoSalesRequest(message, synthesis)) {
+    const telephonyTaskTitle = telcoCoverage?.candidates.length
+      ? `Verifica finale copertura e proposta fibra per ${customer.fullName}`
+      : `Recuperare indirizzo/civico per proposta fibra ${customer.fullName}`;
+
+    tasks.push({
+      id: makeId('task'),
+      kind: 'followup',
+      title: telephonyTaskTitle,
+      assigneeRole: 'telephony',
+      priority: telcoCoverage?.candidates.length ? 9 : 10,
+      customerId: customer.id,
+      status: 'open',
+      createdAt: nowIso(),
+    });
+
+    const topConnectivityOffer = pickTopConnectivityOffer(activeOffers, activeObjectives);
+    if (topConnectivityOffer) {
+      const consult = await consultProposal({
+        customer: {
+          ...customer,
+          segments: customer.segments.includes('fibra') ? customer.segments : [...customer.segments, 'fibra'],
+        },
+        objectives: activeObjectives,
+        offers: activeOffers,
+        offerId: topConnectivityOffer.id,
+        prompt: `${message}\n\n${synthesis}`,
+        rag: state.rag,
+        personaHintsOverride: {
+          preventivi: state.characterStudio.toElizaLike('preventivi'),
+          telephony: state.characterStudio.toElizaLike('telephony'),
+        },
+        llm: state.llm ?? undefined,
+      });
+      consultTopOffer = consult.topOffer ? { id: consult.topOffer.id, title: consult.topOffer.title } : null;
+      opportunity = createCustomerOpportunity({
+        customerId: customer.id,
+        source: 'consult',
+        status: 'open',
+        title: `Proposta connettività per ${customer.fullName}`,
+        summary: [
+          consult.topOffer?.title ? `Top offer ${consult.topOffer.title}` : 'Nessuna top offer',
+          telcoCoverage?.candidates[0]?.fullAddress ? `Civico ${telcoCoverage.candidates[0].fullAddress}` : 'Indirizzo da confermare',
+        ].join(' · '),
+        offerIds: consult.topOffer?.id ? [consult.topOffer.id] : [],
+        runId: swarmRunId ?? undefined,
+        payload: {
+          message,
+          synthesis,
+          telcoCoverage,
+          consult,
+        },
+      });
+    }
+
+    if (customer.phone) {
+      const customerFollowup = telcoCoverage?.candidates.length
+        ? `Ciao ${customer.fullName.split(' ')[0]}, abbiamo individuato il civico ${telcoCoverage.candidates[0]?.fullAddress}. Ti va bene se prepariamo la proposta fibra e ti richiamiamo con l’offerta più adatta?`
+        : `Ciao ${customer.fullName.split(' ')[0]}, per verificare davvero la copertura fibra ci serve l’indirizzo completo con civico. Appena ce lo confermi prepariamo la proposta.`;
+      drafts.push({
+        id: makeId('draft'),
+        customerId: customer.id,
+        channel: 'whatsapp',
+        audience: 'one-to-one',
+        body: customerFollowup,
+        needsApproval: true,
+        reason: 'follow-up telephony da chat swarm',
+        recipientRef: customer.phone,
+        relatedOfferId: consultTopOffer?.id,
+      });
+    }
+
+    drafts.push({
+      id: makeId('draft'),
+      customerId: customer.id,
+      channel: 'telegram',
+      audience: 'one-to-many',
+      body: [
+        `Team telefonia: ${customer.fullName}`,
+        telcoCoverage?.candidates[0]?.fullAddress
+          ? `Copertura verificata su BUL: ${telcoCoverage.candidates[0].fullAddress}`
+          : 'Copertura non verificata: serve indirizzo/civico completo.',
+        consultTopOffer?.title ? `Proposta prioritaria: ${consultTopOffer.title}` : 'Proposta commerciale da rifinire.',
+      ].join('\n'),
+      needsApproval: true,
+      reason: 'handoff team telefonia da chat swarm',
+      relatedOfferId: consultTopOffer?.id,
+    });
+  }
+
+  if (!tasks.length && !drafts.length && !opportunity) return null;
+
+  state.tasks.addMany(tasks);
+  void state.postgresMirror.saveTasks(tasks);
+
+  const outboxItems = state.drafts.addMany(drafts);
+  drafts.forEach((draft) => state.draftsRaw.add(draft));
+  if (outboxItems.length > 0) void state.postgresMirror.saveOutbox(outboxItems);
+
+  if (opportunity) {
+    state.customerOpportunities.upsert(opportunity);
+    void state.postgresMirror.saveCustomerOpportunity(opportunity);
+  }
+
+  state.customers.addInteraction(customer.id, {
+    id: makeId('int'),
+    type: 'handoff.received',
+    channel: 'crm',
+    agentName: 'chat-executor',
+    summary: `Artefatti operativi generati da chat: ${tasks.length} task, ${outboxItems.length} draft`,
+    relatedOfferId: consultTopOffer?.id,
+    relatedRunId: swarmRunId ?? undefined,
+    createdAt: nowIso(),
+  });
+  void state.postgresMirror.saveCustomer(state.customers.getById(customer.id) ?? customer);
+
+  return {
+    tasks: tasks.map((task) => ({
+      id: task.id,
+      kind: task.kind,
+      title: task.title,
+      assigneeRole: task.assigneeRole,
+      status: task.status,
+      priority: task.priority,
+    })),
+    outbox: outboxItems.map((item) => ({
+      id: item.id,
+      channel: item.draft.channel,
+      audience: item.draft.audience,
+      status: item.status,
+      needsApproval: item.draft.needsApproval,
+      reason: item.draft.reason,
+      body: item.draft.body,
+    })),
+    opportunity: opportunity
+      ? {
+          id: opportunity.id,
+          title: opportunity.title,
+          status: opportunity.status,
+          summary: opportunity.summary,
+        }
+      : null,
+    consultTopOffer,
+  };
 }
 
 function formatMoney(value?: number): string | undefined {
@@ -1195,6 +1381,21 @@ export interface ChatSwarmMsg {
   round: number;
 }
 
+interface ChatExecutionArtifacts {
+  tasks: Array<Pick<TaskItem, 'id' | 'kind' | 'title' | 'assigneeRole' | 'status' | 'priority'>>;
+  outbox: Array<{
+    id: string;
+    channel: CommunicationDraft['channel'];
+    audience: CommunicationDraft['audience'];
+    status: OutboxItem['status'];
+    needsApproval: boolean;
+    reason: string;
+    body: string;
+  }>;
+  opportunity?: Pick<CustomerOpportunity, 'id' | 'title' | 'status' | 'summary'> | null;
+  consultTopOffer?: { id: string; title: string } | null;
+}
+
 /**
  * Mappa nome-display-agente → chiave Character Studio.
  * Permette di leggere il profilo persona reale da CharacterStudioRepository.
@@ -1252,7 +1453,7 @@ export type ChatSSEEvent =
   | { type: 'typing'; agent: string; agentRole: string }
   | { type: 'chunk'; agent: string; agentRole: string; kind: ChatSwarmMsg['kind']; round: number; content: string }
   | { type: 'message'; msg: ChatSwarmMsg }
-  | { type: 'done'; synthesis: string; swarmRunId: string | null; sessionId: string; customer: { id: string; fullName: string; segments: string[] } | null }
+  | { type: 'done'; synthesis: string; swarmRunId: string | null; sessionId: string; customer: { id: string; fullName: string; segments: string[] } | null; executionArtifacts?: ChatExecutionArtifacts | null }
   | { type: 'error'; message: string };
 
 /** Costruisce il system prompt per un agente leggendo il profilo da Character Studio */
@@ -4591,6 +4792,7 @@ export function buildServer(state = buildState()) {
       // ── Orchestrazione con callbacks SSE ─────────────────────────────────
       let swarmThread: ChatSwarmMsg[] = [];
       let synthesis = '';
+      let executionArtifacts: ChatExecutionArtifacts | null = null;
 
       const { thread, synthesis: synth } = await runChatOrchestration({
         llm: state.llm,
@@ -4636,12 +4838,19 @@ export function buildServer(state = buildState()) {
         void broadcastSwarmDebug(state, runId, 'chat.message', 0, 0);
       } catch { /* non-blocking */ }
 
-      // ── Salva conversazione ───────────────────────────────────────────────
-      state.conversations.addMessage({ id: makeId('cmsg'), sessionId, role: 'assistant', content: synthesis, swarmThread, swarmRunId: swarmRunId ?? undefined, createdAt: new Date().toISOString() });
-      state.audit.write(makeAuditRecord('chat', 'chat.response', { customerId: customer?.id ?? null, sessionId, swarmRunId, agentsInvolved: [...new Set(swarmThread.map((m) => m.agent))] }));
+      executionArtifacts = await materializeChatExecutionArtifacts({
+        state,
+        customer,
+        message,
+        synthesis,
+        telcoCoverage,
+        activeOffers,
+        activeObjectives,
+        swarmRunId,
+      }).catch(() => null);
 
-      // Registra interazione cliente se il cliente è identificato
-      if (customer?.id) {
+      // ── Salva conversazione ───────────────────────────────────────────────
+      if (!executionArtifacts && customer?.id) {
         state.customers.addInteraction(customer.id, {
           id: makeId('int'),
           type: 'chat.message',
@@ -4654,7 +4863,19 @@ export function buildServer(state = buildState()) {
         void state.postgresMirror.saveCustomer(state.customers.getById(customer.id) ?? customer);
       }
 
-      send({ type: 'done', synthesis, swarmRunId, sessionId, customer: customerData });
+      state.conversations.addMessage({
+        id: makeId('cmsg'),
+        sessionId,
+        role: 'assistant',
+        content: synthesis,
+        swarmThread,
+        swarmRunId: swarmRunId ?? undefined,
+        executionArtifacts: executionArtifacts ?? undefined,
+        createdAt: new Date().toISOString(),
+      });
+      state.audit.write(makeAuditRecord('chat', 'chat.response', { customerId: customer?.id ?? null, sessionId, swarmRunId, agentsInvolved: [...new Set(swarmThread.map((m) => m.agent))] }));
+
+      send({ type: 'done', synthesis, swarmRunId, sessionId, customer: customerData, executionArtifacts: executionArtifacts ?? undefined });
 
     } catch (err) {
       send({ type: 'error', message: err instanceof Error ? err.message : String(err) });

@@ -12,6 +12,7 @@ Monorepo TypeScript per un AI CRM & Swarm Automation Layer orientato al retail/a
 - lookup copertura connettività da address su portale BUL ufficiale, iniettato nel contesto di `Telefonia` / `Commerciale`
 - lookup cliente da chat libera tramite nome/telefono con creazione controllata della master anagrafica
 - opportunità commerciali e risultati assistenza sempre appesi al cliente e consultabili nello storico
+- la chat CRM può materializzare artefatti operativi persistiti: task, draft outbox e opportunità
 
 ## Surface di prodotto
 
